@@ -498,6 +498,15 @@ and legal-liability risk, not a minor error.
   value for something a typical report might include, leave it out entirely rather
   than filling the gap with a placeholder or an invented name. A report with fewer
   sections is far better than one padded with fake scaffolding.
+- When a sheet's context includes a "[REAL COMPUTED STATISTICS]" block, those
+  sum/mean/min/max/null/duplicate numbers were computed exactly with pandas, not
+  estimated. Treat them as ground truth for any total/sum/average/count claim about
+  that column and quote them directly. Do not re-derive a total by manually adding
+  values out of the CSV sample text — that manual arithmetic over truncated text is
+  exactly how past answers got a number's scale wrong (e.g. misreading $999,888 as
+  "$9.98 million"). If a column you need isn't in the computed-statistics block
+  (e.g. it's text, or the workbook is large enough that the column was outside the
+  preview), say so rather than estimating from a partial sample.
 
 ================================================================================
 CHAT RESPONSE FORMATTING — MANDATORY FOR EVERY CONVERSATIONAL REPLY

@@ -37,6 +37,7 @@ from services import (
 )
 from excel_analyzer import analyze_excel_data, query_spreadsheet_data
 from pdf_report import build_insights_pdf, build_rfq_pdf
+from data_profiler import profile_workbook
 
 app = FastAPI(title="Procure.ai Backend")
 
@@ -136,6 +137,7 @@ def _enrich_doc(doc: dict) -> dict:
         'sheet_names': stored.get('sheet_names'),
         'data_preview': preview[:DATA_PREVIEW_CHAR_LIMIT],
         'data_preview_truncated': truncated,
+        'profile': stored.get('profile'),
     }
 
 
@@ -390,6 +392,10 @@ def queue_document_processing(doc_id: str, file_path: str, file_type: str, compa
             DOCUMENT_STORE[doc_id]["row_count"] = total_rows
             DOCUMENT_STORE[doc_id]["columns"] = all_sheets[sheet_names[0]].columns.tolist()
             DOCUMENT_STORE[doc_id]["sheet_names"] = sheet_names
+            # Real pandas-computed sum/mean/min/max per numeric column, handed to the AI
+            # alongside the text preview so it cites verified numbers instead of doing
+            # its own (error-prone) arithmetic on a CSV snippet.
+            DOCUMENT_STORE[doc_id]["profile"] = profile_workbook(all_sheets)
             DOCUMENT_STORE[doc_id]["status"] = "ready"
             TASK_STORE[task_id]["status"] = "completed"
     except Exception as e:

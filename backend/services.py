@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ai_orchestrator import create_chat_completion
+from data_profiler import format_profile_block
 
 BASE_PROMPT_PATH = os.path.join(os.path.dirname(__file__), '..', 'agent_system_prompt.txt')
 
@@ -37,6 +38,15 @@ def build_document_context_block(document_context: dict = None) -> str:
                 f"  Row count: {doc.get('row_count', 'unknown')}\n"
                 f"  Data sample (CSV{', truncated' if doc.get('data_preview_truncated') else ''}), grouped by sheet below:\n{doc['data_preview']}\n"
             )
+            profile_text = format_profile_block(doc.get('profile'))
+            if profile_text:
+                context_block += (
+                    "  [REAL COMPUTED STATISTICS — exact pandas-computed sum/mean/min/max per numeric "
+                    "column, and unique-value counts for text columns, plus null/duplicate counts. These "
+                    "are verified correct. For any total, sum, average, or count claim, cite these exact "
+                    "numbers instead of adding up values yourself from the sample above:\n"
+                    f"{profile_text}\n"
+                )
     return context_block
 
 
@@ -181,7 +191,11 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
             'question and stop — do not also guess with fabricated numbers underneath. When the '
             'user refers to a sheet/page/tab, match it against the real sheet names listed above '
             '(a sheet named "13,14" is one sheet, not "page 13" and "page 14") — never invent a '
-            'generic page-numbering scheme that doesn\'t match the real sheet names.'
+            'generic page-numbering scheme that doesn\'t match the real sheet names. When a '
+            '[REAL COMPUTED STATISTICS] block is present for a sheet, treat those numbers as ground '
+            'truth for any sum/total/average/count claim about that column — quote them directly '
+            'rather than re-adding values from the CSV sample yourself, since manual arithmetic over '
+            'a text preview is exactly how past answers got the scale of a number wrong.'
         ),
     })
     messages.append({'role': 'user', 'content': user_query})
