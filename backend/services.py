@@ -54,7 +54,11 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
         'content': (
             'Reminder: format this reply in Markdown — use "## " headers, "- " bullet points, '
             '**bold** for key terms/figures, and tables for tabular data. Do not answer in a '
-            'single unbroken paragraph if there is more than one distinct point.'
+            'single unbroken paragraph if there is more than one distinct point. '
+            'Also: never invent clause text, figures, or terms not present in the document data '
+            'above. If the request doesn\'t fit the document type (e.g. clause extraction on a '
+            'plain data spreadsheet with no contract language), say so directly instead of '
+            'fabricating an answer.'
         ),
     })
     messages.append({'role': 'user', 'content': user_query})

@@ -247,10 +247,15 @@ const ProcurementAssistant = () => {
       gradient: 'from-amber-50 to-amber-100',
       border: 'border-amber-200',
       text: 'text-amber-900',
-      buildPrompt: (activeDocument) =>
-        activeDocument
-          ? `Extract the key clauses (payment, termination, indemnity, SLA, renewal) from "${activeDocument.name}".`
-          : 'Extract key clauses (payment, termination, indemnity, SLA, renewal) from the uploaded contracts.',
+      buildPrompt: (activeDocument) => {
+        if (!activeDocument) {
+          return 'Extract key clauses (payment, termination, indemnity, SLA, renewal) from the uploaded contracts.';
+        }
+        if (activeDocument.type === 'spreadsheet' || activeDocument.type === 'data') {
+          return `"${activeDocument.name}" is a data spreadsheet, not a contract. Extract the key data points, notable entries, and any anomalies instead of contract clauses.`;
+        }
+        return `Extract the key clauses (payment, termination, indemnity, SLA, renewal) from "${activeDocument.name}".`;
+      },
     },
     {
       id: 'generate-rfq',
