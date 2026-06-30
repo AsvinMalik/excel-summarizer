@@ -248,13 +248,14 @@ const ProcurementAssistant = () => {
       border: 'border-amber-200',
       text: 'text-amber-900',
       buildPrompt: (activeDocument) => {
-        if (!activeDocument) {
-          return 'Extract key clauses (payment, termination, indemnity, SLA, renewal) from the uploaded contracts.';
-        }
-        if (activeDocument.type === 'spreadsheet' || activeDocument.type === 'data') {
-          return `"${activeDocument.name}" is a data spreadsheet, not a contract. Extract the key data points, notable entries, and any anomalies instead of contract clauses.`;
-        }
-        return `Extract the key clauses (payment, termination, indemnity, SLA, renewal) from "${activeDocument.name}".`;
+        const target = activeDocument ? `"${activeDocument.name}"` : 'the uploaded document(s)';
+        return (
+          `Extract the most important structured information from ${target}. First identify what kind of document this actually is, then extract whatever is most relevant to it: ` +
+          'if it contains contract language, pull out the material clauses (payment terms, termination, indemnity, liability, SLA, renewal, and any other clause that matters here — not limited to a fixed list); ' +
+          'if it is a data sheet, invoice, PO, or vendor register, pull out the key fields, notable entries, totals, and any anomalies or outliers; ' +
+          'if it is something else entirely, extract whatever the most important structured facts in it are. ' +
+          'Base everything strictly on what is actually in the document — do not assume it is a contract.'
+        );
       },
     },
     {
