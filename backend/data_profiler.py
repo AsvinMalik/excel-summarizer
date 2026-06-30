@@ -43,9 +43,59 @@ def profile_sheet(df: pd.DataFrame) -> dict:
     }
 
 
+def compute_category_breakdowns(df: pd.DataFrame, max_dimensions: int = 3, max_measures: int = 3, max_groups: int = 15) -> list:
+    """For each low-cardinality text column (a likely dimension, e.g. Vendor/Region)
+    paired with each numeric column (a likely measure, e.g. Spend), pre-compute the
+    sum/mean per group. Handing the model a real, already-computed cross-tab instead
+    of a flat row sample is what lets a narrative answer like "spend by vendor" cite
+    a correct number without doing its own multi-step aggregation in its head."""
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    text_cols = [c for c in df.columns if c not in numeric_cols]
+
+    dimensions = []
+    for col in text_cols:
+        nunique = df[col].nunique()
+        if 2 <= nunique <= max_groups:
+            dimensions.append(col)
+        if len(dimensions) >= max_dimensions:
+            break
+
+    breakdowns = []
+    for dim in dimensions:
+        for measure in numeric_cols[:max_measures]:
+            series = pd.to_numeric(df[measure], errors='coerce')
+            grouped_sum = series.groupby(df[dim]).sum().sort_values(ascending=False)
+            grouped_mean = series.groupby(df[dim]).mean()
+            breakdowns.append({
+                'dimension': dim,
+                'measure': measure,
+                'groups': [
+                    {'group': str(g), 'sum': round(float(grouped_sum[g]), 2), 'mean': round(float(grouped_mean[g]), 2)}
+                    for g in grouped_sum.index
+                ],
+            })
+    return breakdowns
+
+
+def format_breakdowns_block(breakdowns: list) -> str:
+    if not breakdowns:
+        return ''
+    lines = []
+    for b in breakdowns:
+        lines.append(f'    {b["measure"]} by {b["dimension"]}:')
+        for g in b['groups']:
+            lines.append(f'      - {g["group"]}: sum={g["sum"]}, mean={g["mean"]}')
+    return '\n'.join(lines)
+
+
 def profile_workbook(all_sheets: dict) -> dict:
     """all_sheets: {sheet_name: DataFrame} as returned by pd.read_excel(sheet_name=None)."""
-    return {name: profile_sheet(df) for name, df in all_sheets.items()}
+    profiles = {}
+    for name, df in all_sheets.items():
+        profile = profile_sheet(df)
+        profile['breakdowns'] = compute_category_breakdowns(df)
+        profiles[name] = profile
+    return profiles
 
 
 def format_profile_block(profile: dict) -> str:

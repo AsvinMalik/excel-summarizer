@@ -7,8 +7,9 @@ from typing import Any, Dict, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ai_orchestrator import create_chat_completion
-from data_profiler import format_profile_block
+from data_profiler import format_profile_block, format_breakdowns_block
 from query_engine import load_all_sheets, execute_query_spec
+from grounding_verifier import collect_known_numeric_values, find_unverifiable_numbers
 
 BASE_PROMPT_PATH = os.path.join(os.path.dirname(__file__), '..', 'agent_system_prompt.txt')
 
@@ -48,7 +49,55 @@ def build_document_context_block(document_context: dict = None) -> str:
                     "numbers instead of adding up values yourself from the sample above:\n"
                     f"{profile_text}\n"
                 )
+            # Per-sheet breakdowns, not just a single flattened block — a multi-sheet
+            # workbook's category breakdowns must stay attributed to the right sheet.
+            all_breakdowns_text = []
+            for sheet_name, sheet_profile in (doc.get('profile') or {}).items():
+                sheet_breakdown_text = format_breakdowns_block(sheet_profile.get('breakdowns'))
+                if sheet_breakdown_text:
+                    all_breakdowns_text.append(f'    Sheet "{sheet_name}":\n{sheet_breakdown_text}')
+            if all_breakdowns_text:
+                context_block += (
+                    "  [CATEGORY BREAKDOWNS — exact pandas-computed sum/mean of each numeric column, "
+                    "grouped by each low-cardinality text column (e.g. spend by vendor, spend by region). "
+                    "These are pre-computed and verified — when a narrative answer needs a per-category "
+                    "figure (e.g. \"X's spend in region Y\"), copy it directly from here rather than "
+                    "deriving it yourself from individual rows:\n"
+                    + "\n".join(all_breakdowns_text) + "\n"
+                )
     return context_block
+
+
+_KNOWN_VALUES_CACHE: Dict[str, set] = {}
+
+
+def _collect_known_values_for_context(document_context: dict) -> set:
+    """Merge real numeric values across every uploaded document in this session —
+    a narrative answer could cite a figure from any of them, not just the active
+    one. Cached per file_path within a process lifetime since the underlying file
+    on disk doesn't change between requests for the same doc_id."""
+    documents = (document_context or {}).get('documents') or []
+    active_document = (document_context or {}).get('active_document')
+    all_docs = list(documents)
+    if active_document and active_document.get('doc_id') not in {d.get('doc_id') for d in all_docs}:
+        all_docs.append(active_document)
+
+    known: set = set()
+    for doc in all_docs:
+        file_path = doc.get('file_path') if doc else None
+        if not file_path:
+            continue
+        if file_path in _KNOWN_VALUES_CACHE:
+            known |= _KNOWN_VALUES_CACHE[file_path]
+            continue
+        try:
+            all_sheets = load_all_sheets(file_path)
+            values = collect_known_numeric_values(all_sheets)
+        except Exception:
+            continue
+        _KNOWN_VALUES_CACHE[file_path] = values
+        known |= values
+    return known
 
 
 # Structural questions about a document's shape (sheet count, sheet names, row count)
@@ -191,15 +240,20 @@ def _find_column_for_term(term: str, columns: list) -> Optional[str]:
     return None
 
 
-def _apply_deterministic_overrides(user_query: str, spec: dict, columns: list) -> dict:
+def _apply_deterministic_overrides(user_query: str, spec: dict, columns: list, numeric_columns: list = None) -> dict:
     spec = dict(spec)
     query_lower = user_query.lower()
+    numeric_columns = numeric_columns or columns
 
     top_match = _TOP_N_RE.search(user_query)
     bottom_match = _BOTTOM_N_RE.search(user_query)
     group_match = _GROUP_BY_RE.search(user_query)
 
-    if group_match and not spec.get('group_by'):
+    if group_match:
+        # Force this, don't just fill a gap — a model can emit a confident but WRONG
+        # group_by (e.g. it left it null half the time, but the other half it guessed
+        # something other than the literal "grouped by X" target). The regex match on
+        # the user's own words is a stronger signal than either guess.
         found = _find_column_for_term(group_match.group(1), columns)
         if found:
             spec['group_by'] = found
@@ -210,7 +264,37 @@ def _apply_deterministic_overrides(user_query: str, spec: dict, columns: list) -
     if not spec.get('column'):
         by_match = _BY_COLUMN_RE.search(user_query)
         if by_match:
-            found = _find_column_for_term(by_match.group(1), columns)
+            found = _find_column_for_term(by_match.group(1), numeric_columns)
+            if found:
+                spec['column'] = found
+
+    # Explicit aggregation-verb keywords are an unambiguous, stronger signal than the
+    # model's own "operation" guess — seen in testing: "total spend grouped by Region"
+    # sometimes came back as operation:"count" instead of "sum". Force it whenever the
+    # question contains one of these words, except when ranking (top/bottom N) language
+    # is also present, where "operation" must stay null (handled in the branch below).
+    is_ranking_language = bool(top_match or bottom_match)
+    if not is_ranking_language:
+        if re.search(r'\btotal\b|\bsum\b', query_lower):
+            spec['operation'] = 'sum'
+        elif re.search(r'\baverage\b|\bavg\b|\bmean\b', query_lower):
+            spec['operation'] = 'mean'
+        elif re.search(r'\bcount\b|\bhow many\b', query_lower):
+            spec['operation'] = 'count'
+
+    # A model occasionally picks the SAME column for both "column" and "group_by" (e.g.
+    # grouping "Region" sums by "Region" itself), or picks a non-numeric column for a
+    # sum/mean/min/max — both silently produce all-zero/NaN results instead of an error.
+    # If there's exactly one real numeric column in the sheet, that's almost always what
+    # was actually meant; force it rather than let a wrong column through unnoticed.
+    needs_numeric_column = spec.get('operation') in ('sum', 'mean', 'min', 'max', 'median')
+    column_invalid = spec.get('column') and (spec['column'] not in numeric_columns or spec['column'] == spec.get('group_by'))
+    if (needs_numeric_column and column_invalid) or (needs_numeric_column and not spec.get('column')):
+        if len(numeric_columns) == 1:
+            spec['column'] = numeric_columns[0]
+        else:
+            by_match = _BY_COLUMN_RE.search(user_query)
+            found = _find_column_for_term(by_match.group(1), numeric_columns) if by_match else None
             if found:
                 spec['column'] = found
 
@@ -232,7 +316,7 @@ def _apply_deterministic_overrides(user_query: str, spec: dict, columns: list) -
     else:
         superlative_match = _SUPERLATIVE_ROW_RE.search(user_query)
         if superlative_match and not _EXPLICIT_AGG_RE.search(query_lower) and not spec.get('group_by'):
-            found = _find_column_for_term(superlative_match.group(2), columns)
+            found = _find_column_for_term(superlative_match.group(2), numeric_columns)
             if found:
                 spec['column'] = found
             spec['operation'] = None
@@ -247,6 +331,36 @@ def _apply_deterministic_overrides(user_query: str, spec: dict, columns: list) -
         spec['filters'] = []
 
     return spec
+
+
+def _try_build_spec_from_regex_only(user_query: str, sheet_column_map: dict, numeric_sheet_column_map: dict) -> Optional[dict]:
+    """Fallback for when the LLM's own spec call fails or comes back unanswerable —
+    seen intermittently in testing even on an otherwise-clear "top N by column"
+    question (weak-model non-determinism). For the unambiguous top-N/bottom-N-by-
+    column shape, the regex layer alone has everything needed: no LLM judgment call
+    required, so it can't fail the way free-text generation can. Only handles the
+    single-sheet case — multi-sheet ambiguity genuinely does need a model to pick."""
+    if len(sheet_column_map) != 1:
+        return None
+    sheet_name = next(iter(sheet_column_map))
+    numeric_columns = numeric_sheet_column_map.get(sheet_name, [])
+
+    top_match = _TOP_N_RE.search(user_query)
+    bottom_match = _BOTTOM_N_RE.search(user_query)
+    if not (top_match or bottom_match):
+        return None
+
+    by_match = _BY_COLUMN_RE.search(user_query)
+    column = _find_column_for_term(by_match.group(1), numeric_columns) if by_match else None
+    if not column and len(numeric_columns) == 1:
+        column = numeric_columns[0]
+    if not column:
+        return None
+
+    return {
+        'answerable': True, 'sheet': sheet_name, 'column': column, 'operation': None,
+        'group_by': None, 'filters': [], 'sort': None, 'limit': None,
+    }
 
 
 def _format_query_result(spec: dict, result: dict) -> str:
@@ -308,6 +422,10 @@ def _try_answer_data_query(user_query: str, document_context: dict = None) -> Op
         sheet_name: [c['name'] for c in sheet_profile.get('columns', [])]
         for sheet_name, sheet_profile in (doc.get('profile') or {}).items()
     }
+    numeric_sheet_column_map = {
+        sheet_name: [c['name'] for c in sheet_profile.get('columns', []) if c.get('data_type') == 'numeric']
+        for sheet_name, sheet_profile in (doc.get('profile') or {}).items()
+    }
     if not sheet_column_map:
         return None
 
@@ -354,13 +472,16 @@ def _try_answer_data_query(user_query: str, document_context: dict = None) -> Op
         )
         spec = _extract_json(response.choices[0].message.content)
     except Exception:
-        return None
+        spec = None
 
     if not isinstance(spec, dict) or not spec.get('answerable'):
-        return None
+        spec = _try_build_spec_from_regex_only(user_query, sheet_column_map, numeric_sheet_column_map)
+        if not spec:
+            return None
 
     sheet_columns = sheet_column_map.get(spec.get('sheet'), [])
-    spec = _apply_deterministic_overrides(user_query, spec, sheet_columns)
+    numeric_columns = numeric_sheet_column_map.get(spec.get('sheet'), [])
+    spec = _apply_deterministic_overrides(user_query, spec, sheet_columns, numeric_columns)
 
     try:
         all_sheets = load_all_sheets(doc['file_path'])
@@ -441,6 +562,43 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
 
     response = create_chat_completion(messages, max_tokens=1200)
     text = response.choices[0].message.content
+
+    # The deterministic query engine above guarantees correct arithmetic for direct
+    # data questions, but this free-form narrative path is still LLM-generated text —
+    # it can still misstate an individual figure even with the right data in context
+    # (e.g. reading "$1,800,000" and writing "$180,000"). Catch that here: check every
+    # number the answer claims against every real value in the workbook, give the
+    # model up to two chances to self-correct with the specific bad numbers called
+    # out, and discard rather than show the answer if it still doesn't check out.
+    known_values = _collect_known_values_for_context(document_context)
+    if known_values:
+        correction_messages = messages
+        for retry_num in range(2):
+            unverifiable = find_unverifiable_numbers(text, known_values)
+            if not unverifiable:
+                break
+            correction_messages = correction_messages + [
+                {'role': 'assistant', 'content': text},
+                {'role': 'user', 'content': (
+                    'Your previous answer cited these specific figures, but they don\'t match any real value '
+                    'found in the document data provided: ' + ', '.join(f'{v:,.2f}' for v in unverifiable[:5])
+                    + '. Real data IS available in the [REAL COMPUTED STATISTICS] and [CATEGORY BREAKDOWNS] '
+                    'blocks above — rewrite your answer using THOSE exact numbers in place of the wrong ones. '
+                    'Everything else about your previous answer was fine; keep it, just fix the incorrect '
+                    'figures. Do not respond by refusing to cite any numbers at all — the real data is right '
+                    'there in the context, use it normally.'
+                )},
+            ]
+            retry_response = create_chat_completion(correction_messages, max_tokens=1200)
+            text = retry_response.choices[0].message.content
+        else:
+            if find_unverifiable_numbers(text, known_values):
+                text = (
+                    'I drafted an answer but one or more specific figures in it didn\'t match any real '
+                    'value in your data, so I\'m not showing it rather than risk giving you a wrong number. '
+                    'Try asking for a specific total, average, or ranking instead (e.g. "total spend", "top '
+                    '5 vendors by spend") — those are computed directly from your data and always exact.'
+                )
 
     return {
         'timestamp': response.created,
@@ -743,100 +901,135 @@ def generate_report(document_context: dict = None, focus: str = None) -> dict:
         )
         max_tokens = 2200
 
-    response = create_chat_completion(
-        [{'role': 'system', 'content': load_system_prompt()}, {'role': 'user', 'content': prompt}],
-        max_tokens=max_tokens,
-    )
-    text = response.choices[0].message.content
+    known_values = _collect_known_values_for_context(document_context)
+    call_messages = [{'role': 'system', 'content': load_system_prompt()}, {'role': 'user', 'content': prompt}]
 
-    try:
-        parsed = _extract_json(text)
-    except Exception:
-        parsed = {
-            'report_markdown': 'Could not generate a structured report from this document — try again, or try a more specific request.',
-            'chart_title': None,
-            'chart_type': None,
-            'chart_data': [],
-        }
+    # Up to 2 attempts total: the first generation, plus one retry if a numeric-grounding
+    # check below flags a figure that doesn't match any real value in the workbook (the
+    # other safety nets — sheet-grounding, placeholder text — give an immediate hard
+    # discard with no retry since they signal the model ignored the format entirely; a
+    # bad individual number is a narrower failure worth giving one self-correction shot).
+    for attempt in range(2):
+        response = create_chat_completion(call_messages, max_tokens=max_tokens)
+        text = response.choices[0].message.content
 
-    report_markdown = parsed.get('report_markdown')
-    if isinstance(report_markdown, list):
-        # Weaker models sometimes structure this as one object per sheet (e.g.
-        # {"sheet_number": 1, "section": "Summary", "content": "..."}) despite being
-        # told it must be a single string. Recover the actual text instead of dumping
-        # raw JSON to the user.
-        parts = []
-        for item in report_markdown:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                content = next((item[k] for k in ('content', 'text', 'markdown', 'section_content') if isinstance(item.get(k), str)), None)
-                if content:
-                    header = item.get('section') or item.get('sheet_name')
-                    parts.append(f"## {header}\n{content}" if header and not content.lstrip().startswith('#') else content)
-        parsed['report_markdown'] = '\n\n'.join(parts) if parts else json.dumps(report_markdown)
-    elif isinstance(report_markdown, dict):
-        parsed['report_markdown'] = json.dumps(report_markdown)
-    parsed.setdefault('report_markdown', text if isinstance(text, str) else '')
+        try:
+            parsed = _extract_json(text)
+        except Exception:
+            parsed = {
+                'report_markdown': 'Could not generate a structured report from this document — try again, or try a more specific request.',
+                'chart_title': None,
+                'chart_type': None,
+                'chart_data': [],
+            }
 
-    # Weaker models occasionally double-escape newlines when building the JSON string
-    # (producing the literal two characters "\n" in the value instead of a real
-    # newline), which json.loads() then leaves as literal backslash-n text. Markdown
-    # content should never legitimately contain that literal sequence, so clean it up.
-    if isinstance(parsed.get('report_markdown'), str):
-        parsed['report_markdown'] = parsed['report_markdown'].replace('\\n', '\n')
+        report_markdown = parsed.get('report_markdown')
+        if isinstance(report_markdown, list):
+            # Weaker models sometimes structure this as one object per sheet (e.g.
+            # {"sheet_number": 1, "section": "Summary", "content": "..."}) despite being
+            # told it must be a single string. Recover the actual text instead of dumping
+            # raw JSON to the user.
+            parts = []
+            for item in report_markdown:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    content = next((item[k] for k in ('content', 'text', 'markdown', 'section_content') if isinstance(item.get(k), str)), None)
+                    if content:
+                        header = item.get('section') or item.get('sheet_name')
+                        parts.append(f"## {header}\n{content}" if header and not content.lstrip().startswith('#') else content)
+            parsed['report_markdown'] = '\n\n'.join(parts) if parts else json.dumps(report_markdown)
+        elif isinstance(report_markdown, dict):
+            parsed['report_markdown'] = json.dumps(report_markdown)
+        parsed.setdefault('report_markdown', text if isinstance(text, str) else '')
 
-    # Hard safety net for the per-sheet mode specifically: a weaker model occasionally
-    # ignores the per-sheet instruction entirely and free-associates a generic-sounding
-    # "typical business report" (fake categories, fake vendor names, fake contract
-    # numbers) with zero connection to the actual sheets. If the report doesn't mention
-    # at least half of the real sheet names, that's a strong signal it did exactly
-    # that — refuse to show it rather than risk displaying fabricated content.
-    if multi_sheet_docs:
-        all_sheet_names = [n for doc in multi_sheet_docs for n in (doc.get('sheet_names') or [])]
-        report_text = parsed.get('report_markdown') or ''
-        # Word-boundary match, not plain substring — a sheet literally named "1" would
-        # otherwise "match" trivially inside any generated number like "$125,000".
-        mentioned = sum(
-            1 for n in all_sheet_names
-            if re.search(r'(?<![\w.])' + re.escape(n) + r'(?![\w.])', report_text, re.IGNORECASE)
-        )
-        if all_sheet_names and mentioned < max(1, len(all_sheet_names) // 2):
+        # Weaker models occasionally double-escape newlines when building the JSON string
+        # (producing the literal two characters "\n" in the value instead of a real
+        # newline), which json.loads() then leaves as literal backslash-n text. Markdown
+        # content should never legitimately contain that literal sequence, so clean it up.
+        if isinstance(parsed.get('report_markdown'), str):
+            parsed['report_markdown'] = parsed['report_markdown'].replace('\\n', '\n')
+
+        # Hard safety net for the per-sheet mode specifically: a weaker model occasionally
+        # ignores the per-sheet instruction entirely and free-associates a generic-sounding
+        # "typical business report" (fake categories, fake vendor names, fake contract
+        # numbers) with zero connection to the actual sheets. If the report doesn't mention
+        # at least half of the real sheet names, that's a strong signal it did exactly
+        # that — refuse to show it rather than risk displaying fabricated content.
+        if multi_sheet_docs:
+            all_sheet_names = [n for doc in multi_sheet_docs for n in (doc.get('sheet_names') or [])]
+            report_text = parsed.get('report_markdown') or ''
+            # Word-boundary match, not plain substring — a sheet literally named "1" would
+            # otherwise "match" trivially inside any generated number like "$125,000".
+            mentioned = sum(
+                1 for n in all_sheet_names
+                if re.search(r'(?<![\w.])' + re.escape(n) + r'(?![\w.])', report_text, re.IGNORECASE)
+            )
+            if all_sheet_names and mentioned < max(1, len(all_sheet_names) // 2):
+                parsed['report_markdown'] = (
+                    'The generated report didn\'t stay grounded in this workbook\'s actual sheets — discarded '
+                    'rather than shown, since this tool never displays content it can\'t verify against your '
+                    'real data. Please try again.'
+                )
+                parsed['chart_title'] = None
+                parsed['chart_type'] = None
+                parsed['chart_data'] = []
+                return parsed
+
+        # General safety net for BOTH report modes: a model defaulting to a generic
+        # corporate-report template produces literal placeholder brackets like
+        # "[Your Name/Title]", "[Company Name]", "[Current Fiscal Year]" instead of real
+        # content — sometimes alongside an entirely invented contact person (seen directly
+        # in testing: a fabricated "Dr. Jane Doe" with a fake email and phone number).
+        # Require a space inside the brackets (multi-word) so legitimate short labels like
+        # "[HIGH]"/"[PENDING]" aren't flagged — only template-style phrases are.
+        placeholder_match = re.search(r'\[[^\[\]\(\)]*\s[^\[\]\(\)]*\](?!\()', parsed.get('report_markdown') or '')
+        if placeholder_match:
             parsed['report_markdown'] = (
-                'The generated report didn\'t stay grounded in this workbook\'s actual sheets — discarded '
-                'rather than shown, since this tool never displays content it can\'t verify against your '
-                'real data. Please try again.'
+                f'The generated report used template placeholder text (e.g. "{placeholder_match.group(0)}") instead '
+                'of real content from your document — discarded rather than shown. Please try again.'
             )
             parsed['chart_title'] = None
             parsed['chart_type'] = None
             parsed['chart_data'] = []
             return parsed
 
-    # General safety net for BOTH report modes: a model defaulting to a generic
-    # corporate-report template produces literal placeholder brackets like
-    # "[Your Name/Title]", "[Company Name]", "[Current Fiscal Year]" instead of real
-    # content — sometimes alongside an entirely invented contact person (seen directly
-    # in testing: a fabricated "Dr. Jane Doe" with a fake email and phone number).
-    # Require a space inside the brackets (multi-word) so legitimate short labels like
-    # "[HIGH]"/"[PENDING]" aren't flagged — only template-style phrases are.
-    placeholder_match = re.search(r'\[[^\[\]\(\)]*\s[^\[\]\(\)]*\](?!\()', parsed.get('report_markdown') or '')
-    if placeholder_match:
-        parsed['report_markdown'] = (
-            f'The generated report used template placeholder text (e.g. "{placeholder_match.group(0)}") instead '
-            'of real content from your document — discarded rather than shown. Please try again.'
-        )
-        parsed['chart_title'] = None
-        parsed['chart_type'] = None
-        parsed['chart_data'] = []
-        return parsed
+        # Numeric-grounding safety net: every specific figure the report cites must trace
+        # to a real cell value or a real computed aggregate (column-level or per-category)
+        # in the actual workbook — not just plausible/well-formatted prose. Give the model
+        # one chance to self-correct with the exact bad numbers called out before discarding.
+        unverifiable = find_unverifiable_numbers(parsed.get('report_markdown') or '', known_values)
+        if not unverifiable:
+            parsed['chart_data'] = _sanitize_chart_data(parsed.get('chart_data'))
+            parsed['chart_type'] = parsed.get('chart_type') if parsed.get('chart_type') in ('bar', 'pie', 'line') else None
+            if not parsed['chart_data']:
+                parsed['chart_type'] = None
+            parsed.setdefault('chart_title', None)
+            return parsed
 
-    parsed['chart_data'] = _sanitize_chart_data(parsed.get('chart_data'))
-    parsed['chart_type'] = parsed.get('chart_type') if parsed.get('chart_type') in ('bar', 'pie', 'line') else None
-    if not parsed['chart_data']:
-        parsed['chart_type'] = None
-    parsed.setdefault('chart_title', None)
+        if attempt == 0:
+            call_messages = call_messages + [
+                {'role': 'assistant', 'content': text},
+                {'role': 'user', 'content': (
+                    'Your previous report cited these specific figures, but they don\'t match any real value '
+                    'found in the document data provided: ' + ', '.join(f'{v:,.2f}' for v in unverifiable[:5])
+                    + '. Real data IS available in the [REAL COMPUTED STATISTICS] and [CATEGORY BREAKDOWNS] '
+                    'blocks above — rewrite the full report in the same JSON format, using THOSE exact numbers '
+                    'in place of the wrong ones. Everything else about the previous draft was fine; keep it, '
+                    'just fix the incorrect figures. Do not respond by omitting numbers altogether — the real '
+                    'data is right there in the context, use it normally.'
+                )},
+            ]
 
-    return parsed
+    return {
+        'report_markdown': (
+            'I drafted a report but one or more specific figures in it didn\'t match any real value in your '
+            'data, so I\'m not showing it rather than risk giving you a wrong number. Please try again.'
+        ),
+        'chart_title': None,
+        'chart_type': None,
+        'chart_data': [],
+    }
 
 
 def generate_insights_report(document_context: dict = None) -> dict:
@@ -863,26 +1056,60 @@ def generate_insights_report(document_context: dict = None) -> dict:
             f"{context_block}"
         )
 
-    response = create_chat_completion(
-        [{'role': 'system', 'content': load_system_prompt()}, {'role': 'user', 'content': prompt}],
-        max_tokens=1500,
-    )
-    text = response.choices[0].message.content
+    known_values = _collect_known_values_for_context(document_context) if documents else set()
+    call_messages = [{'role': 'system', 'content': load_system_prompt()}, {'role': 'user', 'content': prompt}]
 
-    try:
-        parsed = _extract_json(text)
-    except Exception:
-        parsed = {'title': 'Procurement Insights Report', 'overview': text, 'headlines': []}
+    for attempt in range(2):
+        response = create_chat_completion(call_messages, max_tokens=1500)
+        text = response.choices[0].message.content
 
-    parsed.setdefault('title', 'Procurement Insights Report')
-    parsed.setdefault('overview', '')
-    headlines = parsed.get('headlines')
-    parsed['headlines'] = headlines if isinstance(headlines, list) else []
+        try:
+            parsed = _extract_json(text)
+        except Exception:
+            parsed = {'title': 'Procurement Insights Report', 'overview': text, 'headlines': []}
+
+        parsed.setdefault('title', 'Procurement Insights Report')
+        parsed.setdefault('overview', '')
+        headlines = parsed.get('headlines')
+        parsed['headlines'] = headlines if isinstance(headlines, list) else []
+
+        # Every figure cited across the overview and headline explanations must trace to
+        # a real value in the workbook — same numeric-grounding check used for the full
+        # report, since insight headlines are exactly the kind of punchy, number-heavy
+        # claim that's easy for a model to get wrong while sounding confident.
+        combined_text = parsed['overview'] + '\n' + '\n'.join(
+            h.get('explanation', '') for h in parsed['headlines'] if isinstance(h, dict)
+        )
+        unverifiable = find_unverifiable_numbers(combined_text, known_values)
+        if not unverifiable:
+            return {
+                'title': parsed['title'],
+                'overview': parsed['overview'],
+                'headlines': parsed['headlines'],
+                'documents': [{'name': doc.get('name', 'Unknown'), 'type': doc.get('type', 'unknown')} for doc in documents],
+            }
+
+        if attempt == 0:
+            call_messages = call_messages + [
+                {'role': 'assistant', 'content': text},
+                {'role': 'user', 'content': (
+                    'Your previous answer cited these specific figures, but they don\'t match any real value '
+                    'found in the document data provided: ' + ', '.join(f'{v:,.2f}' for v in unverifiable[:5])
+                    + '. Real data IS available in the [REAL COMPUTED STATISTICS] and [CATEGORY BREAKDOWNS] '
+                    'blocks above — rewrite it in the same JSON format, using THOSE exact numbers in place of '
+                    'the wrong ones. Everything else about the previous draft was fine; keep it, just fix the '
+                    'incorrect figures. Do not respond by omitting numbers altogether — the real data is right '
+                    'there in the context, use it normally.'
+                )},
+            ]
 
     return {
-        'title': parsed['title'],
-        'overview': parsed['overview'],
-        'headlines': parsed['headlines'],
+        'title': 'Procurement Insights Report',
+        'overview': (
+            'I drafted insights but one or more specific figures didn\'t match any real value in your data, '
+            'so I\'m not showing them rather than risk giving you a wrong number. Please try again.'
+        ),
+        'headlines': [],
         'documents': [{'name': doc.get('name', 'Unknown'), 'type': doc.get('type', 'unknown')} for doc in documents],
     }
 
