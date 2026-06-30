@@ -21,14 +21,7 @@ import { uploadDocument, sendChat, downloadInsightsPdf } from '../services/api';
 import { saveDocumentMetadata, deleteDocumentMetadata, getUserDocuments, saveChatMessage } from '../services/firestoreService';
 import { useAuth } from '../context/AuthContext';
 
-const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc, sessionId }) => {
-  const [messages, setMessages] = useState([
-    {
-      id: 1,
-      type: 'system',
-      text: 'Welcome to Procure.ai — your enterprise procurement intelligence platform. Upload contracts, request quotations, analyze vendor data, or ask anything about your procurement operations.',
-    },
-  ]);
+const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc, messages, setMessages, sessionId }) => {
   const [input, setInput] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);

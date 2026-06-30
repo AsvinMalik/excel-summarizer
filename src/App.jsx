@@ -34,6 +34,13 @@ function App() {
   const [activeSection, setActiveSection] = useState('assistant');
   const [documents, setDocuments] = useState([]);
   const [activeDoc, setActiveDoc] = useState(null);
+  const [messages, setMessages] = useState([
+    {
+      id: 1,
+      type: 'system',
+      text: 'Welcome to Procure.ai — your enterprise procurement intelligence platform. Upload contracts, request quotations, analyze vendor data, or ask anything about your procurement operations.',
+    },
+  ]);
   const [sessionId] = useState(() => localStorage.getItem('procure_session') || `session-${Date.now()}`);
   const { user, loading, logout, isFirebaseConfigured } = useAuth();
   const requiresAuth = isFirebaseConfigured;
@@ -268,6 +275,8 @@ function App() {
                 setDocuments={setDocuments}
                 activeDoc={activeDoc}
                 setActiveDoc={setActiveDoc}
+                messages={messages}
+                setMessages={setMessages}
                 sessionId={sessionId}
               />
             </div>
