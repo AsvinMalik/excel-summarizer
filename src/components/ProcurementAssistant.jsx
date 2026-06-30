@@ -418,6 +418,17 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
                 td: ({ node, ...props }) => (
                   <td className="border border-slate-200 px-3 py-2 align-top" {...props} />
                 ),
+                // Defensive: if a model wraps its whole reply in a code fence (it shouldn't,
+                // see system prompt), wrap the text instead of letting it overflow unreadably.
+                pre: ({ node, ...props }) => (
+                  <pre className="whitespace-pre-wrap break-words overflow-x-auto rounded-md bg-slate-900 text-slate-100 p-3 text-xs" {...props} />
+                ),
+                code: ({ node, inline, ...props }) =>
+                  inline ? (
+                    <code className="rounded bg-slate-200 px-1 py-0.5 text-xs" {...props} />
+                  ) : (
+                    <code className="whitespace-pre-wrap break-words" {...props} />
+                  ),
               }}
             >
               {msg.text}

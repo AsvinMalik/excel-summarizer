@@ -58,11 +58,17 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
         'content': (
             'Reminder: format this reply in Markdown — use "## " headers, "- " bullet points, '
             '**bold** for key terms/figures, and tables for tabular data. Do not answer in a '
-            'single unbroken paragraph if there is more than one distinct point. '
+            'single unbroken paragraph if there is more than one distinct point. Never wrap the '
+            'entire reply in a single ``` code fence — that renders unreadably in this UI; '
+            'fences are only for short literal code/data snippets, not the whole answer. '
             'Also: never invent clause text, figures, or terms not present in the document data '
             'above. If the request doesn\'t fit the document type (e.g. clause extraction on a '
             'plain data spreadsheet with no contract language), say so directly instead of '
-            'fabricating an answer.'
+            'fabricating an answer. If you are unsure what the user means, ask ONE clarifying '
+            'question and stop — do not also guess with fabricated numbers underneath. When the '
+            'user refers to a sheet/page/tab, match it against the real sheet names listed above '
+            '(a sheet named "13,14" is one sheet, not "page 13" and "page 14") — never invent a '
+            'generic page-numbering scheme that doesn\'t match the real sheet names.'
         ),
     })
     messages.append({'role': 'user', 'content': user_query})
