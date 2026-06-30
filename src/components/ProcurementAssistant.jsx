@@ -21,7 +21,7 @@ import { uploadDocument, sendChat, downloadInsightsPdf } from '../services/api';
 import { saveDocumentMetadata, deleteDocumentMetadata, getUserDocuments, saveChatMessage } from '../services/firestoreService';
 import { useAuth } from '../context/AuthContext';
 
-const ProcurementAssistant = () => {
+const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc, sessionId }) => {
   const [messages, setMessages] = useState([
     {
       id: 1,
@@ -30,18 +30,11 @@ const ProcurementAssistant = () => {
     },
   ]);
   const [input, setInput] = useState('');
-  const [documents, setDocuments] = useState([]);
-  const [activeDoc, setActiveDoc] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
   const [downloadingInsights, setDownloadingInsights] = useState(false);
-  const [sessionId] = useState(() => localStorage.getItem('procure_session') || `session-${Date.now()}`);
   const { user, logout } = useAuth();
   const messagesEnd = useRef(null);
-
-  useEffect(() => {
-    localStorage.setItem('procure_session', sessionId);
-  }, [sessionId]);
 
   useEffect(() => {
     if (!user) return;

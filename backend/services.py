@@ -76,24 +76,46 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
 
 def _extract_json(text: str) -> dict:
     cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', text.strip())
-    return json.loads(cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Weaker local models sometimes add JS-style "// comment" trailing notes inside the
+    # JSON, which isn't valid JSON. Strip those (but not "://" inside URLs) and retry.
+    no_comments = re.sub(r'(?<!:)//[^\n"]*$', '', cleaned, flags=re.MULTILINE)
+    try:
+        return json.loads(no_comments)
+    except json.JSONDecodeError:
+        pass
+
+    # Last resort: grab the first balanced-looking {...} block in the text.
+    match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+    if match:
+        return json.loads(match.group(0))
+
+    raise ValueError('Could not extract valid JSON from model response')
 
 
 def generate_rfq(input_data: dict) -> dict:
     prompt = (
         'Create a professional RFQ document using the following details. '
-        'Return output in JSON with keys: executive_summary, scope_of_work, terms_and_conditions, evaluation_criteria, '
-        'requested_info, legal_certifications, document_number, company_name, response_deadline.'
+        'Return ONLY valid JSON (no markdown code fences, no comments) with keys: executive_summary, '
+        'scope_of_work, terms_and_conditions, evaluation_criteria, requested_info, legal_certifications, '
+        'document_number, company_name, response_deadline. '
+        '"executive_summary", "document_number", "company_name", "response_deadline" must be plain strings '
+        '(never objects). "scope_of_work", "terms_and_conditions", "requested_info", "legal_certifications" '
+        'must be arrays of strings. "evaluation_criteria" must be an object of category name to percentage string.'
     )
     body = f"{prompt}\n\nInput:\n{json.dumps(input_data, indent=2)}"
-    response = create_chat_completion([{'role': 'system', 'content': load_system_prompt()}, {'role': 'user', 'content': body}], max_tokens=1200)
+    response = create_chat_completion([{'role': 'system', 'content': load_system_prompt()}, {'role': 'user', 'content': body}], max_tokens=2000)
     text = response.choices[0].message.content
 
     try:
         parsed = _extract_json(text)
     except Exception:
         parsed = {
-            'executive_summary': text,
+            'executive_summary': input_data.get('executive_summary') or 'Could not generate a structured RFQ draft — please review the fields manually.',
             'scope_of_work': input_data.get('scope_of_work', []),
             'terms_and_conditions': input_data.get('terms_and_conditions', []),
             'evaluation_criteria': input_data.get('evaluation_criteria', {}),
@@ -103,6 +125,11 @@ def generate_rfq(input_data: dict) -> dict:
             'company_name': input_data.get('company_name'),
             'response_deadline': input_data.get('response_deadline'),
         }
+
+    for scalar_field in ('executive_summary', 'document_number', 'company_name', 'response_deadline'):
+        value = parsed.get(scalar_field)
+        if isinstance(value, (dict, list)):
+            parsed[scalar_field] = json.dumps(value)
 
     return parsed
 
@@ -207,3 +234,144 @@ def generate_insights_report(document_context: dict = None) -> dict:
 
 def agentic_loop(user_query: str, document_context: dict = None, session_state: dict = None, max_iterations: int = 3) -> dict:
     return procure_agent(user_query, document_context, session_state)
+
+
+_VALID_PRIORITIES = ('high', 'medium', 'low')
+
+
+def _sanitize_rfq_candidates(raw_candidates) -> list:
+    sanitized = []
+    if not isinstance(raw_candidates, list):
+        return sanitized
+    for item in raw_candidates:
+        if not isinstance(item, dict) or not item.get('vendor'):
+            continue
+        reasons = item.get('reasons')
+        sanitized.append({
+            'vendor': str(item['vendor']),
+            'value': item.get('value'),
+            'expiry': item.get('expiry'),
+            'score': item.get('score'),
+            'reasons': [str(r) for r in reasons] if isinstance(reasons, list) else [],
+            'priority': item.get('priority') if item.get('priority') in _VALID_PRIORITIES else 'medium',
+            'source_document': item.get('source_document'),
+        })
+    return sanitized
+
+
+def detect_rfq_candidates(document_context: dict = None) -> dict:
+    documents = (document_context or {}).get('documents') or []
+    context_block = build_document_context_block(document_context)
+
+    if not documents:
+        return {
+            'candidates': [],
+            'analysis_note': 'No documents have been uploaded to this session yet. Upload a vendor contract register or spend spreadsheet to detect RFQ opportunities.',
+            'documents_analyzed': 0,
+        }
+
+    prompt = (
+        'Analyze the document data below to find vendors/contracts that are good candidates for a new RFQ '
+        '(Request for Quotation). A candidate is anything that genuinely stands out in the actual data — for '
+        'example: a contract or relationship nearing an expiry/renewal date, a vendor with a low performance '
+        'or risk score, pricing that looks like an outlier versus similar rows, a flagged compliance issue, or '
+        'any other signal actually present in the columns provided. The exact signals depend entirely on what '
+        'columns this data actually has — do not assume fixed field names; read the real column headers and '
+        'values shown below.\n\n'
+        'Return ONLY valid JSON (no markdown code fences) with keys: candidates, analysis_note.\n'
+        '"candidates" is an array of objects, each shaped like: '
+        '{"vendor": "<name from the data>", "value": <number or null>, "expiry": "<date string or null>", '
+        '"score": <number or null>, "reasons": ["<short reason grounded in real data>", ...], '
+        '"priority": "high"|"medium"|"low", "source_document": "<document name>"}. '
+        'If the data has a contract value, spend, or price column for this vendor, always populate "value" with '
+        'that real number — do not leave it null when the data has it. Always populate "source_document" with '
+        'the actual document name this vendor came from. "analysis_note" is 1-2 sentences summarizing what was found.\n\n'
+        'Only include a candidate if there is a real, citable reason grounded in the document data — never '
+        'invent vendors, figures, or dates that are not present. If no documents contain usable signals, return '
+        'an empty candidates array and explain why in analysis_note.'
+        f"{context_block}"
+    )
+
+    response = create_chat_completion(
+        [{'role': 'system', 'content': load_system_prompt()}, {'role': 'user', 'content': prompt}],
+        max_tokens=1800,
+    )
+    text = response.choices[0].message.content
+
+    try:
+        parsed = _extract_json(text)
+    except Exception:
+        parsed = {'candidates': [], 'analysis_note': text}
+
+    candidates = _sanitize_rfq_candidates(parsed.get('candidates'))
+    priority_rank = {'high': 0, 'medium': 1, 'low': 2}
+    candidates.sort(key=lambda c: priority_rank.get(c['priority'], 1))
+
+    return {
+        'candidates': candidates,
+        'analysis_note': parsed.get('analysis_note', ''),
+        'documents_analyzed': len(documents),
+    }
+
+
+def extract_rfq_template(document_context: dict, vendor: str) -> dict:
+    context_block = build_document_context_block(document_context)
+
+    prompt = (
+        f'Build a pre-filled draft RFQ (Request for Quotation) for the vendor "{vendor}", grounded strictly in '
+        'the document data below. Use whatever real details exist about this vendor (contract value, scope, '
+        'past terms, performance, risk notes) to pre-fill the draft; where the data does not specify something, '
+        'use a clearly reasonable procurement default rather than inventing vendor-specific facts.\n\n'
+        'Return ONLY valid JSON (no markdown code fences, no comments) with keys: company_name, document_number, '
+        'date_issued, response_deadline, executive_summary, scope_of_work, quantity, unit_of_measure, '
+        'quality_standards, delivery_location, timeline, terms_and_conditions, evaluation_criteria, '
+        'requested_info, legal_certifications, auto_filled_fields.\n'
+        '"company_name", "document_number", "date_issued", "response_deadline", "executive_summary", '
+        '"unit_of_measure", "quality_standards", "delivery_location", "timeline" must ALL be plain strings — '
+        'never objects or arrays, even if you need to combine multiple facts into one sentence. "quantity" is a '
+        'number. "scope_of_work", "terms_and_conditions", "requested_info", "legal_certifications" are string '
+        'arrays. "evaluation_criteria" is an object of category to percentage string. "auto_filled_fields" is an '
+        'array of the field names you were able to ground in real document data (as opposed to defaults).'
+        f"{context_block}"
+    )
+
+    response = create_chat_completion(
+        [{'role': 'system', 'content': load_system_prompt()}, {'role': 'user', 'content': prompt}],
+        max_tokens=2000,
+    )
+    text = response.choices[0].message.content
+
+    try:
+        parsed = _extract_json(text)
+    except Exception:
+        parsed = {
+            'company_name': vendor,
+            'executive_summary': f'Could not generate a structured RFQ draft for {vendor} — please fill in the fields manually.',
+            'scope_of_work': [],
+            'terms_and_conditions': [],
+            'evaluation_criteria': {},
+            'requested_info': [],
+            'legal_certifications': [],
+            'auto_filled_fields': [],
+        }
+
+    parsed.setdefault('company_name', vendor)
+    parsed.setdefault('scope_of_work', [])
+    parsed.setdefault('terms_and_conditions', [])
+    parsed.setdefault('evaluation_criteria', {})
+    parsed.setdefault('requested_info', [])
+    parsed.setdefault('legal_certifications', [])
+    parsed.setdefault('auto_filled_fields', [])
+
+    # Defensive: weaker models occasionally return an object/array for a field the UI
+    # treats as plain text. Coerce those back to a string so the form never shows
+    # "[object Object]" instead of crashing or silently corrupting the field.
+    for scalar_field in (
+        'company_name', 'document_number', 'date_issued', 'response_deadline',
+        'executive_summary', 'unit_of_measure', 'quality_standards', 'delivery_location', 'timeline',
+    ):
+        value = parsed.get(scalar_field)
+        if isinstance(value, (dict, list)):
+            parsed[scalar_field] = json.dumps(value)
+
+    return parsed

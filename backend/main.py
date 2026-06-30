@@ -25,7 +25,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from services import procure_agent, generate_rfq, generate_report, generate_insights_report, create_chat_completion
+from services import (
+    procure_agent,
+    generate_rfq,
+    generate_report,
+    generate_insights_report,
+    detect_rfq_candidates,
+    extract_rfq_template,
+    create_chat_completion,
+)
 from excel_analyzer import analyze_excel_data, query_spreadsheet_data
 from pdf_report import build_insights_pdf
 
@@ -86,6 +94,11 @@ class ExportRequest(BaseModel):
 class InsightsRequest(BaseModel):
     session_id: Optional[str] = None
     context: Optional[dict] = None
+
+class RFQAutoFillRequest(BaseModel):
+    session_id: Optional[str] = None
+    context: Optional[dict] = None
+    vendor: str
 
 # In-memory stores for demo purpose
 DOCUMENT_STORE = {}
@@ -240,6 +253,16 @@ async def export_report(request: ExportRequest):
 @app.post("/api/rfq")
 async def create_rfq(request: dict):
     result = generate_rfq(request)
+    return JSONResponse(result)
+
+@app.post("/api/analyze-for-rfq")
+async def analyze_for_rfq(request: InsightsRequest):
+    result = detect_rfq_candidates(enrich_document_context(request.context))
+    return JSONResponse(result)
+
+@app.post("/api/auto-fill-rfq")
+async def auto_fill_rfq(request: RFQAutoFillRequest):
+    result = extract_rfq_template(enrich_document_context(request.context), request.vendor)
     return JSONResponse(result)
 
 @app.post("/api/report")

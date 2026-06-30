@@ -96,4 +96,42 @@ async function downloadInsightsPdf({ sessionId, context }) {
   return response.blob();
 }
 
-export { uploadDocument, sendChat, listDocuments, querySpreadsheet, generateRFQ, generateReport, downloadInsightsPdf };
+async function analyzeForRFQ({ sessionId, context }) {
+  const response = await fetch(`${BASE_URL}/api/analyze-for-rfq`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, context }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`RFQ analysis failed: ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
+async function autoFillRFQ({ sessionId, context, vendor }) {
+  const response = await fetch(`${BASE_URL}/api/auto-fill-rfq`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, context, vendor }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`RFQ auto-fill failed: ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
+export {
+  uploadDocument,
+  sendChat,
+  listDocuments,
+  querySpreadsheet,
+  generateRFQ,
+  generateReport,
+  downloadInsightsPdf,
+  analyzeForRFQ,
+  autoFillRFQ,
+};

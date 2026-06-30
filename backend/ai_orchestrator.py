@@ -54,7 +54,15 @@ _demo = DemoProvider()
 # (unlimited local) -> Cerebras (secondary cloud). OpenRouter is kept as an extra layer
 # beyond the doc — it was already configured and working before this upgrade, so it adds
 # a free fifth chance before giving up to demo mode rather than removing capability.
-_CLOUD_AND_LOCAL_PROVIDERS = [_groq, _phi3, _cerebras]
+#
+# PREFER_LOCAL_OLLAMA=true (set only in local backend/.env, never in production) moves
+# Phi3 to the front so local testing burns zero Groq/Cerebras/OpenRouter quota. Phi3 is
+# unreachable in production (no local Ollama there), so this is a no-op when deployed —
+# is_configured returns False and the chain falls through to Groq automatically.
+if os.getenv('PREFER_LOCAL_OLLAMA', 'false').lower() == 'true':
+    _CLOUD_AND_LOCAL_PROVIDERS = [_phi3, _groq, _cerebras]
+else:
+    _CLOUD_AND_LOCAL_PROVIDERS = [_groq, _phi3, _cerebras]
 
 
 def create_chat_completion(messages: List[Dict[str, Any]], max_tokens: int = 1500) -> MockResponse:

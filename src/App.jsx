@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Layers,
   FileText,
@@ -32,8 +32,15 @@ const FeatureCard = ({ title, description, badge }) => (
 
 function App() {
   const [activeSection, setActiveSection] = useState('assistant');
+  const [documents, setDocuments] = useState([]);
+  const [activeDoc, setActiveDoc] = useState(null);
+  const [sessionId] = useState(() => localStorage.getItem('procure_session') || `session-${Date.now()}`);
   const { user, loading, logout, isFirebaseConfigured } = useAuth();
   const requiresAuth = isFirebaseConfigured;
+
+  useEffect(() => {
+    localStorage.setItem('procure_session', sessionId);
+  }, [sessionId]);
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
@@ -225,7 +232,7 @@ function App() {
                 </div>
               </div>
               <div className="mt-10">
-                <RFQBuilder />
+                <RFQBuilder documents={documents} activeDoc={activeDoc} sessionId={sessionId} />
               </div>
             </div>
           )}
@@ -256,7 +263,13 @@ function App() {
 
           {activeSection === 'assistant' && (
             <div className="mt-4">
-              <ProcurementAssistant />
+              <ProcurementAssistant
+                documents={documents}
+                setDocuments={setDocuments}
+                activeDoc={activeDoc}
+                setActiveDoc={setActiveDoc}
+                sessionId={sessionId}
+              />
             </div>
           )}
             </section>
