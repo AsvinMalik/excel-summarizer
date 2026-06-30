@@ -76,3 +76,94 @@ def build_insights_pdf(report_data: dict) -> bytes:
 
     doc.build(story)
     return buffer.getvalue()
+
+
+def build_rfq_pdf(rfq_draft: dict) -> bytes:
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=LETTER,
+        topMargin=0.85 * inch, bottomMargin=0.85 * inch,
+        leftMargin=0.9 * inch, rightMargin=0.9 * inch,
+    )
+    styles = _styles()
+    story = []
+
+    company_name = rfq_draft.get('company_name') or 'Procure.ai'
+    doc_number = rfq_draft.get('document_number') or 'RFQ-DRAFT'
+    story.append(Paragraph(f'Request for Quotation — {doc_number}', styles['title']))
+    story.append(Paragraph(str(company_name), styles['meta']))
+
+    meta_rows = [
+        ['Document Number', str(doc_number)],
+        ['Date Issued', str(rfq_draft.get('date_issued') or '—')],
+        ['Response Deadline', str(rfq_draft.get('response_deadline') or '—')],
+        ['Quantity', f"{rfq_draft.get('quantity', '—')} {rfq_draft.get('unit_of_measure', '')}".strip()],
+    ]
+    meta_table = Table(meta_rows, colWidths=[2.2 * inch, 3.8 * inch])
+    meta_table.setStyle(TableStyle([
+        ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9.5),
+        ('TEXTCOLOR', (0, 0), (-1, -1), SLATE),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#e2e8f0')),
+        ('TOPPADDING', (0, 0), (-1, -1), 5),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+    ]))
+    story.append(Spacer(1, 8))
+    story.append(meta_table)
+    story.append(Spacer(1, 14))
+    story.append(HRFlowable(width='100%', thickness=0.75, color=colors.HexColor('#e2e8f0'), spaceAfter=14))
+
+    def _section(title, content):
+        if not content:
+            return
+        story.append(Paragraph(title, styles['h2']))
+        if isinstance(content, str):
+            story.append(Paragraph(content, styles['body']))
+        elif isinstance(content, list):
+            for item in content:
+                story.append(Paragraph(f'• {item}', styles['body']))
+
+    _section('Executive Summary', rfq_draft.get('executive_summary'))
+
+    specs = []
+    if rfq_draft.get('quality_standards'):
+        specs.append(f"Quality standards: {rfq_draft['quality_standards']}")
+    if rfq_draft.get('delivery_location'):
+        specs.append(f"Delivery location: {rfq_draft['delivery_location']}")
+    if rfq_draft.get('timeline'):
+        specs.append(f"Timeline: {rfq_draft['timeline']}")
+    _section('Specifications', specs)
+
+    _section('Scope of Work', rfq_draft.get('scope_of_work'))
+    _section('Terms and Conditions', rfq_draft.get('terms_and_conditions'))
+
+    evaluation_criteria = rfq_draft.get('evaluation_criteria') or {}
+    if evaluation_criteria:
+        story.append(Paragraph('Evaluation Criteria', styles['h2']))
+        rows = [['Category', 'Weight']] + [[str(k), str(v)] for k, v in evaluation_criteria.items()]
+        eval_table = Table(rows, colWidths=[3.5 * inch, 2.5 * inch])
+        eval_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#eff6ff')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), BRAND_BLUE),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9.5),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#e2e8f0')),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ]))
+        story.append(eval_table)
+        story.append(Spacer(1, 12))
+
+    _section('Requested Information', rfq_draft.get('requested_info'))
+    _section('Legal Certifications', rfq_draft.get('legal_certifications'))
+
+    story.append(Spacer(1, 16))
+    story.append(HRFlowable(width='100%', thickness=0.5, color=colors.HexColor('#e2e8f0'), spaceAfter=10))
+    story.append(Paragraph(
+        'This RFQ is a request for information. Submission does not obligate the Company to execute a contract. '
+        'Vendor is responsible for all submission costs.',
+        styles['meta'],
+    ))
+
+    doc.build(story)
+    return buffer.getvalue()

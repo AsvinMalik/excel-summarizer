@@ -124,6 +124,34 @@ async function autoFillRFQ({ sessionId, context, vendor }) {
   return response.json();
 }
 
+async function refineRFQDraft({ draft, instruction }) {
+  const response = await fetch(`${BASE_URL}/api/rfq/refine`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ draft, instruction }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`RFQ refinement failed: ${response.statusText}`);
+  }
+
+  return response.json();
+}
+
+async function exportRFQPdf({ draft }) {
+  const response = await fetch(`${BASE_URL}/api/rfq/export-pdf`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ draft }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`RFQ export failed: ${response.statusText}`);
+  }
+
+  return response.blob();
+}
+
 export {
   uploadDocument,
   sendChat,
@@ -134,4 +162,6 @@ export {
   downloadInsightsPdf,
   analyzeForRFQ,
   autoFillRFQ,
+  refineRFQDraft,
+  exportRFQPdf,
 };

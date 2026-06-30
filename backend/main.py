@@ -32,10 +32,11 @@ from services import (
     generate_insights_report,
     detect_rfq_candidates,
     extract_rfq_template,
+    refine_rfq_draft,
     create_chat_completion,
 )
 from excel_analyzer import analyze_excel_data, query_spreadsheet_data
-from pdf_report import build_insights_pdf
+from pdf_report import build_insights_pdf, build_rfq_pdf
 
 app = FastAPI(title="Procure.ai Backend")
 
@@ -104,6 +105,13 @@ class ReportRequest(BaseModel):
     session_id: Optional[str] = None
     context: Optional[dict] = None
     focus: Optional[str] = None
+
+class RFQRefineRequest(BaseModel):
+    draft: dict
+    instruction: str
+
+class RFQExportRequest(BaseModel):
+    draft: dict
 
 # In-memory stores for demo purpose
 DOCUMENT_STORE = {}
@@ -260,6 +268,22 @@ async def export_report(request: ExportRequest):
 async def create_rfq(request: dict):
     result = generate_rfq(request)
     return JSONResponse(result)
+
+@app.post("/api/rfq/refine")
+async def refine_rfq(request: RFQRefineRequest):
+    result = refine_rfq_draft(request.draft, request.instruction)
+    return JSONResponse(result)
+
+@app.post("/api/rfq/export-pdf")
+async def export_rfq_pdf(request: RFQExportRequest):
+    pdf_bytes = build_rfq_pdf(request.draft)
+    doc_number = request.draft.get('document_number') or 'rfq-draft'
+    safe_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in str(doc_number))
+    return StreamingResponse(
+        iter([pdf_bytes]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}.pdf"'},
+    )
 
 @app.post("/api/analyze-for-rfq")
 async def analyze_for_rfq(request: InsightsRequest):

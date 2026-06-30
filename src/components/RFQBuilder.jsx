@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Download, FileText, ShieldCheck, BarChart3, Sparkles, X, Clock, TrendingDown, AlertTriangle } from 'lucide-react';
+import { Download, Upload, FileText, ShieldCheck, BarChart3, Sparkles, X, Clock, TrendingDown, AlertTriangle, Send, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -17,7 +17,7 @@ import {
   Tooltip,
   Legend,
 } from 'recharts';
-import { generateRFQ, generateReport, analyzeForRFQ, autoFillRFQ } from '../services/api';
+import { generateRFQ, generateReport, analyzeForRFQ, autoFillRFQ, refineRFQDraft, exportRFQPdf } from '../services/api';
 
 const CHART_COLORS = ['#0284c7', '#7c3aed', '#059669', '#d97706', '#dc2626', '#0891b2', '#65a30d', '#db2777'];
 
@@ -227,6 +227,12 @@ const RFQBuilder = ({ documents = [], activeDoc = null, sessionId }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  // Draft refinement chat
+  const [refineMessages, setRefineMessages] = useState([]);
+  const [refineInput, setRefineInput] = useState('');
+  const [refining, setRefining] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
   // Smart RFQ detection state
   const [candidates, setCandidates] = useState(null);
   const [analysisNote, setAnalysisNote] = useState('');
@@ -296,6 +302,7 @@ const RFQBuilder = ({ documents = [], activeDoc = null, sessionId }) => {
       setAutoFilledFrom({ vendor: candidate.vendor, fields: response.auto_filled_fields || [] });
       setReviewMode(true);
       setRfqDraft(null);
+      setRefineMessages([]);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -308,6 +315,7 @@ const RFQBuilder = ({ documents = [], activeDoc = null, sessionId }) => {
     setAutoFilledFrom(null);
     setReviewMode(true);
     setRfqDraft(null);
+    setRefineMessages([]);
   };
 
   const handleBackToSuggestions = () => {
@@ -321,10 +329,52 @@ const RFQBuilder = ({ documents = [], activeDoc = null, sessionId }) => {
     try {
       const response = await generateRFQ({ input: rfqInput });
       setRfqDraft(response);
+      setRefineMessages([]);
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRefineSubmit = async () => {
+    const instruction = refineInput.trim();
+    if (!instruction || !rfqDraft || refining) return;
+    setRefining(true);
+    setRefineInput('');
+    setRefineMessages((prev) => [...prev, { id: Date.now(), role: 'user', text: instruction }]);
+    try {
+      const updated = await refineRFQDraft({ draft: rfqDraft, instruction });
+      const { _refine_error: refineError, ...cleanDraft } = updated;
+      setRfqDraft(cleanDraft);
+      setRefineMessages((prev) => [
+        ...prev,
+        { id: Date.now() + 1, role: 'assistant', text: refineError || 'Done — the draft has been updated.' },
+      ]);
+    } catch (err) {
+      setRefineMessages((prev) => [...prev, { id: Date.now() + 1, role: 'assistant', text: `Error: ${err.message}` }]);
+    } finally {
+      setRefining(false);
+    }
+  };
+
+  const handleExportDraft = async () => {
+    if (!rfqDraft || exporting) return;
+    setExporting(true);
+    try {
+      const blob = await exportRFQPdf({ draft: rfqDraft });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${rfqDraft.document_number || 'rfq-draft'}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -640,27 +690,132 @@ const RFQBuilder = ({ documents = [], activeDoc = null, sessionId }) => {
           rfqDraft ? (
             <div className="mt-6 space-y-4">
               <div className="rounded-3xl border border-slate-200 bg-white p-5">
+                <p className="text-lg font-semibold text-slate-900">{rfqDraft.company_name || 'Untitled RFQ'}</p>
+                <p className="text-xs text-slate-500">Request for Quotation</p>
+                <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-600 sm:grid-cols-4">
+                  <div><span className="text-slate-400">Doc #</span><br />{rfqDraft.document_number || '—'}</div>
+                  <div><span className="text-slate-400">Issued</span><br />{rfqDraft.date_issued || '—'}</div>
+                  <div><span className="text-slate-400">Deadline</span><br />{rfqDraft.response_deadline || '—'}</div>
+                  <div><span className="text-slate-400">Quantity</span><br />{rfqDraft.quantity || '—'} {rfqDraft.unit_of_measure || ''}</div>
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-slate-200 bg-white p-5">
                 <p className="text-sm uppercase tracking-[0.24em] text-slate-500">Executive summary</p>
                 <p className="mt-3 text-sm leading-6 text-slate-700">{rfqDraft.executive_summary}</p>
               </div>
+
+              {(rfqDraft.quality_standards || rfqDraft.delivery_location || rfqDraft.timeline) && (
+                <div className="rounded-3xl border border-slate-200 bg-white p-5">
+                  <p className="text-sm uppercase tracking-[0.24em] text-slate-500">Specifications</p>
+                  <ul className="mt-3 space-y-1 text-sm text-slate-700">
+                    {rfqDraft.quality_standards && <li>• Quality standards: {rfqDraft.quality_standards}</li>}
+                    {rfqDraft.delivery_location && <li>• Delivery location: {rfqDraft.delivery_location}</li>}
+                    {rfqDraft.timeline && <li>• Timeline: {rfqDraft.timeline}</li>}
+                  </ul>
+                </div>
+              )}
+
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="rounded-3xl border border-slate-200 bg-white p-5">
                   <p className="text-sm uppercase tracking-[0.24em] text-slate-500">Scope of work</p>
                   <ul className="mt-3 space-y-2 text-sm text-slate-700">
-                    {rfqDraft.scope_of_work.map((item, index) => (
+                    {(rfqDraft.scope_of_work || []).map((item, index) => (
                       <li key={index}>• {item}</li>
                     ))}
                   </ul>
                 </div>
                 <div className="rounded-3xl border border-slate-200 bg-white p-5">
-                  <p className="text-sm uppercase tracking-[0.24em] text-slate-500">Key terms</p>
+                  <p className="text-sm uppercase tracking-[0.24em] text-slate-500">Terms and conditions</p>
                   <ul className="mt-3 space-y-2 text-sm text-slate-700">
-                    {rfqDraft.terms_and_conditions.map((item, index) => (
+                    {(rfqDraft.terms_and_conditions || []).map((item, index) => (
                       <li key={index}>• {item}</li>
                     ))}
                   </ul>
                 </div>
               </div>
+
+              {rfqDraft.evaluation_criteria && Object.keys(rfqDraft.evaluation_criteria).length > 0 && (
+                <div className="rounded-3xl border border-slate-200 bg-white p-5">
+                  <p className="text-sm uppercase tracking-[0.24em] text-slate-500">Evaluation criteria</p>
+                  <table className="mt-3 w-full text-sm">
+                    <tbody>
+                      {Object.entries(rfqDraft.evaluation_criteria).map(([key, value]) => (
+                        <tr key={key} className="border-t border-slate-100">
+                          <td className="py-1.5 text-slate-700 capitalize">{key.replace(/_/g, ' ')}</td>
+                          <td className="py-1.5 text-right font-medium text-slate-900">{value}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                {rfqDraft.requested_info?.length > 0 && (
+                  <div className="rounded-3xl border border-slate-200 bg-white p-5">
+                    <p className="text-sm uppercase tracking-[0.24em] text-slate-500">Requested information</p>
+                    <ul className="mt-3 space-y-2 text-sm text-slate-700">
+                      {rfqDraft.requested_info.map((item, index) => (
+                        <li key={index}>• {item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {rfqDraft.legal_certifications?.length > 0 && (
+                  <div className="rounded-3xl border border-slate-200 bg-white p-5">
+                    <p className="text-sm uppercase tracking-[0.24em] text-slate-500">Legal certifications</p>
+                    <ul className="mt-3 space-y-2 text-sm text-slate-700">
+                      {rfqDraft.legal_certifications.map((item, index) => (
+                        <li key={index}>• {item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-3xl border border-slate-200 bg-white p-5">
+                <p className="text-sm uppercase tracking-[0.24em] text-slate-500">Refine with AI</p>
+                <p className="mt-1 text-xs text-slate-500">Ask for changes to the draft above — e.g. "change payment terms to Net 60" or "add a confidentiality clause".</p>
+
+                {refineMessages.length > 0 && (
+                  <div className="mt-3 max-h-48 space-y-2 overflow-y-auto rounded-2xl bg-slate-50 p-3">
+                    {refineMessages.map((msg) => (
+                      <div key={msg.id} className={`text-sm ${msg.role === 'user' ? 'text-slate-900' : 'text-sky-700'}`}>
+                        <span className="font-semibold">{msg.role === 'user' ? 'You: ' : 'AI: '}</span>
+                        {msg.text}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="mt-3 flex gap-2">
+                  <input
+                    value={refineInput}
+                    onChange={(e) => setRefineInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleRefineSubmit()}
+                    placeholder="e.g. change payment terms to Net 60"
+                    disabled={refining}
+                    className="flex-1 rounded-3xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm text-slate-900 disabled:opacity-50"
+                  />
+                  <button
+                    onClick={handleRefineSubmit}
+                    disabled={refining || !refineInput.trim()}
+                    className="inline-flex items-center justify-center rounded-full bg-slate-900 px-4 py-2.5 text-white transition hover:bg-slate-800 disabled:opacity-40"
+                  >
+                    {refining ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+                  </button>
+                </div>
+              </div>
+
+              <button
+                onClick={handleExportDraft}
+                disabled={exporting}
+                className="inline-flex items-center gap-2 rounded-full bg-emerald-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {exporting ? <Loader2 size={18} className="animate-spin" /> : <Upload size={18} />}
+                {exporting ? 'Exporting…' : 'Export Draft'}
+              </button>
             </div>
           ) : (
             <div className="mt-6 rounded-3xl border border-dashed border-slate-300 bg-white p-8 text-center text-sm text-slate-500">

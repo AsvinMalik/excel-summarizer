@@ -211,12 +211,109 @@ def generate_rfq(input_data: dict) -> dict:
             'response_deadline': input_data.get('response_deadline'),
         }
 
+    # date_issued/quantity/unit_of_measure/quality_standards/delivery_location/timeline are
+    # user-provided form values, not something the AI needs to invent — always carry them
+    # through from the original input rather than asking the model to regenerate them.
+    for passthrough_field in ('date_issued', 'quantity', 'unit_of_measure', 'quality_standards', 'delivery_location', 'timeline'):
+        parsed.setdefault(passthrough_field, input_data.get(passthrough_field))
+
     for scalar_field in ('executive_summary', 'document_number', 'company_name', 'response_deadline'):
         value = parsed.get(scalar_field)
         if isinstance(value, (dict, list)):
             parsed[scalar_field] = json.dumps(value)
 
     return parsed
+
+
+_RFQ_SCALAR_FIELDS = (
+    'executive_summary', 'document_number', 'company_name', 'response_deadline',
+    'date_issued', 'quantity', 'unit_of_measure', 'quality_standards', 'delivery_location', 'timeline',
+)
+_RFQ_ARRAY_FIELDS = ('scope_of_work', 'terms_and_conditions', 'requested_info', 'legal_certifications')
+
+
+_PLACEHOLDER_ITEM_PATTERN = re.compile(r'^[\.\s]*$|^\(?(unchanged|same|no change|as before)\)?\.?$', re.IGNORECASE)
+
+
+def _coerce_string_array(value, fallback: list) -> list:
+    """Ensure every item is a plain string. Weaker models sometimes turn a string array
+    into objects like {"original_term":..., "new_term":...} when asked to edit one item —
+    pull out the most likely intended string rather than discarding the edit entirely.
+    Also drops lazy placeholder items (e.g. "...", "(unchanged)") some models substitute
+    for items they didn't bother repeating, despite being told to return the full array."""
+    if not isinstance(value, list):
+        return fallback
+    coerced = []
+    for item in value:
+        if isinstance(item, str):
+            if _PLACEHOLDER_ITEM_PATTERN.match(item.strip()):
+                continue
+            coerced.append(item)
+        elif isinstance(item, dict):
+            for key in ('new_term', 'text', 'value', 'term', 'updated', 'content'):
+                if isinstance(item.get(key), str):
+                    coerced.append(item[key])
+                    break
+            else:
+                continue
+        else:
+            coerced.append(str(item))
+    return coerced if coerced else fallback
+
+
+def refine_rfq_draft(current_draft: dict, instruction: str) -> dict:
+    valid_keys = list(current_draft.keys())
+    prompt = (
+        'Here is the current draft of an RFQ (Request for Quotation) document, as JSON. The user has asked '
+        f'for a specific change: "{instruction}"\n\n'
+        'Return ONLY a JSON object containing the fields that actually need to change as a direct result of '
+        'this instruction — and NOTHING else. Do not include fields you are leaving unchanged, even if you '
+        'regenerated them in your head; omit them entirely from your response. For example, if the instruction '
+        'is only about payment terms, return only "terms_and_conditions" (and "executive_summary" only if it '
+        'specifically mentions the old payment terms) — never include document_number, dates, or any other '
+        'untouched field.\n\n'
+        'Preserve each field\'s original type exactly: "scope_of_work", "terms_and_conditions", '
+        '"requested_info", "legal_certifications" must stay plain arrays of strings (never objects like '
+        '{"original_term":..., "new_term":...} — just replace the string itself). The "omit unchanged fields" '
+        'rule applies at the FIELD level only — if you include an array field at all, you MUST return the '
+        'COMPLETE array with every item (both the changed one and all unchanged ones copied verbatim). Never '
+        'use a placeholder like "..." or "(unchanged)" inside an array, and never return a shorter array than '
+        'the original unless an item was genuinely supposed to be removed. "evaluation_criteria" must stay an '
+        'object of category name to percentage string. Scalar fields must stay plain strings or numbers.\n\n'
+        f'Valid field names in this draft: {", ".join(valid_keys)}\n\n'
+        'Return ONLY valid JSON (no markdown code fences, no comments) — just the changed fields as a sparse patch.\n\n'
+        f'Current draft:\n{json.dumps(current_draft, indent=2)}'
+    )
+    response = create_chat_completion(
+        [{'role': 'system', 'content': load_system_prompt()}, {'role': 'user', 'content': prompt}],
+        max_tokens=1500,
+    )
+    text = response.choices[0].message.content
+
+    try:
+        patch = _extract_json(text)
+    except Exception:
+        return {**current_draft, '_refine_error': f'Could not apply "{instruction}" — draft left unchanged. Try rephrasing the request.'}
+
+    if not isinstance(patch, dict):
+        return {**current_draft, '_refine_error': f'Could not apply "{instruction}" — draft left unchanged. Try rephrasing the request.'}
+
+    # Only accept keys that already exist in the draft — never let the model add stray
+    # new fields. Everything not in the patch is guaranteed untouched by construction.
+    patch = {k: v for k, v in patch.items() if k in valid_keys}
+    merged = {**current_draft, **patch}
+
+    for scalar_field in _RFQ_SCALAR_FIELDS:
+        value = merged.get(scalar_field)
+        if isinstance(value, (dict, list)):
+            merged[scalar_field] = json.dumps(value)
+    for array_field in _RFQ_ARRAY_FIELDS:
+        if array_field in patch:
+            merged[array_field] = _coerce_string_array(merged.get(array_field), current_draft.get(array_field, []))
+    if 'evaluation_criteria' in patch and not isinstance(merged.get('evaluation_criteria'), dict):
+        merged['evaluation_criteria'] = current_draft.get('evaluation_criteria', {})
+
+    return merged
 
 
 def _sanitize_chart_data(raw_chart_data) -> list:
