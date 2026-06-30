@@ -1,0 +1,33 @@
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+backend/.env
+
+# Dependencies
+node_modules/
+backend/.venv/
+.venv/
+
+# Build output
+dist/
+dist-ssr/
+
+# Backend runtime data
+backend/uploads/
+backend/logs/
+
+# Logs
+*.log
+frontend.log
+frontend_err.log
+
+# Editor/OS
+.vscode/
+.cursor/
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
