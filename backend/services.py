@@ -105,6 +105,35 @@ def _try_answer_structural_question(user_query: str, document_context: dict = No
     return '\n'.join(lines) if lines else None
 
 
+# Action verbs + document-referencing nouns that, together with a completely empty
+# document context, signal "analyze something" requests with nothing to analyze —
+# the exact pattern that produced a fully fabricated report (fake workbook name, fake
+# spend table) when a user cleared their last document and clicked a quick action.
+# This is a last line of defense — the frontend's quick actions already refuse to
+# send these prompts with zero documents — but a manually-typed request can still
+# reach here, so it must never be allowed to invite fabrication either.
+_DOC_ACTION_VERBS = ('summarize', 'extract', 'build', 'generate', 'create', 'analyze', 'analyse')
+_DOC_NOUNS = ('document', 'file', 'spreadsheet', 'contract', 'report', 'rfq', 'data', 'sheet')
+
+
+def _try_refuse_empty_document_request(user_query: str, document_context: dict = None) -> Optional[str]:
+    documents = (document_context or {}).get('documents') or []
+    active_document = (document_context or {}).get('active_document')
+    if documents or active_document:
+        return None  # real document context exists — let the AI handle it normally
+
+    query_lower = user_query.lower()
+    has_verb = any(v in query_lower for v in _DOC_ACTION_VERBS)
+    has_noun = any(n in query_lower for n in _DOC_NOUNS)
+    if has_verb and has_noun:
+        return (
+            'There\'s nothing uploaded yet for me to work from. Please upload a contract or '
+            'spreadsheet first, then ask again — I won\'t generate a report, summary, or RFQ '
+            'from data that doesn\'t exist.'
+        )
+    return None
+
+
 def procure_agent(user_query: str, document_context: dict = None, session_state: dict = None) -> dict:
     structural_answer = _try_answer_structural_question(user_query, document_context)
     if structural_answer:
@@ -112,6 +141,15 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
             'timestamp': int(datetime.utcnow().timestamp()),
             'model': 'deterministic',
             'content': [{'type': 'text', 'text': structural_answer}],
+            'tool_calls': [],
+        }
+
+    refusal = _try_refuse_empty_document_request(user_query, document_context)
+    if refusal:
+        return {
+            'timestamp': int(datetime.utcnow().timestamp()),
+            'model': 'deterministic',
+            'content': [{'type': 'text', 'text': refusal}],
             'tool_calls': [],
         }
 
@@ -613,7 +651,7 @@ def extract_rfq_template(document_context: dict, vendor: str) -> dict:
 
     # Same crash-prevention as generate_rfq(): the frontend renders these as plain
     # <li>{item}</li> with no defensive handling, so a stray object/dict item would
-    # hard-crash the React render instead of degrading gracefully.
+    # hard-crash the React render instead of degrading gracefull
     for array_field in ('scope_of_work', 'terms_and_conditions', 'requested_info', 'legal_certifications'):
         parsed[array_field] = _coerce_string_array(parsed.get(array_field), [])
     if isinstance(parsed.get('evaluation_criteria'), dict):

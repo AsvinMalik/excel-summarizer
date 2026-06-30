@@ -272,6 +272,18 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
 
   const handleQuickAction = (action) => {
     if (analyzing) return;
+    // These actions all presuppose there's something to analyze. With zero documents
+    // uploaded, sending the fallback "analyze the uploaded documents" prompt anyway
+    // invites the model to fabricate a plausible-looking answer from nothing — never
+    // let that reach the AI. Handle locally instead, with no network/AI call at all.
+    if (documents.length === 0) {
+      setMessages((prev) => [
+        ...prev,
+        { id: Date.now(), type: 'user', text: action.label },
+        { id: Date.now() + 1, type: 'assistant', text: 'Please upload a contract or spreadsheet first — there\'s nothing uploaded yet for me to analyze.' },
+      ]);
+      return;
+    }
     const activeDocument = activeDoc ? documents.find((doc) => doc.id === activeDoc) : null;
     handleSendMessage(action.buildPrompt(activeDocument));
   };
@@ -284,6 +296,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
           type="button"
           onClick={() => handleQuickAction(action)}
           disabled={analyzing}
+          title={documents.length === 0 ? 'Upload a document first' : undefined}
           className={`flex items-center gap-2 px-3 py-2 bg-gradient-to-r ${action.gradient} border ${action.border} rounded-lg hover:shadow-md transition text-sm font-medium ${action.text} disabled:opacity-50 disabled:cursor-not-allowed`}
         >
           <action.icon size={16} /> {action.label}
