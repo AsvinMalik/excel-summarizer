@@ -68,11 +68,11 @@ async function generateRFQ({ input }) {
   return response.json();
 }
 
-async function generateReport({ input }) {
+async function generateReport({ sessionId, context, focus }) {
   const response = await fetch(`${BASE_URL}/api/report`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
+    body: JSON.stringify({ session_id: sessionId, context, focus }),
   });
 
   if (!response.ok) {

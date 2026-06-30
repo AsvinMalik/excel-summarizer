@@ -100,6 +100,11 @@ class RFQAutoFillRequest(BaseModel):
     context: Optional[dict] = None
     vendor: str
 
+class ReportRequest(BaseModel):
+    session_id: Optional[str] = None
+    context: Optional[dict] = None
+    focus: Optional[str] = None
+
 # In-memory stores for demo purpose
 DOCUMENT_STORE = {}
 SESSION_STORE = {}
@@ -267,8 +272,8 @@ async def auto_fill_rfq(request: RFQAutoFillRequest):
     return JSONResponse(result)
 
 @app.post("/api/report")
-async def create_report(request: dict):
-    result = generate_report(request)
+async def create_report(request: ReportRequest):
+    result = generate_report(enrich_document_context(request.context), focus=request.focus)
     return JSONResponse(result)
 
 @app.post("/api/insights/pdf")

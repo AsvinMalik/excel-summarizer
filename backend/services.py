@@ -215,40 +215,69 @@ def _sanitize_chart_data(raw_chart_data) -> list:
     return sanitized
 
 
-def generate_report(input_data: dict) -> dict:
+def generate_report(document_context: dict = None, focus: str = None) -> dict:
+    documents = (document_context or {}).get('documents') or []
+    context_block = build_document_context_block(document_context)
+
+    if not documents:
+        return {
+            'report_markdown': (
+                'No documents have been uploaded to this session yet. Upload a contract or '
+                'spend/vendor spreadsheet first, then generate a report from its real data.'
+            ),
+            'chart_title': None,
+            'chart_type': None,
+            'chart_data': [],
+        }
+
+    focus_line = f'\n\nThe user asked the report to focus on: {focus}' if focus else ''
     prompt = (
-        'Create an executive procurement report summary using the following details. '
-        'Return ONLY valid JSON (no markdown code fences) with keys: '
-        'report_type, executive_summary, key_findings, chart_title, chart_type, chart_data. '
-        '"chart_type" must be exactly one of "bar", "pie", or "line", chosen to best represent the data '
-        '(bar for rankings/comparisons, pie for composition/breakdown, line for trends over time). '
-        '"chart_data" must be a JSON array of 3 to 8 objects shaped like {"name": "<short label>", "value": <number>}, '
-        'representing the most relevant quantitative breakdown for this report (e.g. spend by category, '
-        'vendor count by risk level, renewals by month). Use real numbers implied by the input data; '
-        'if no numeric data is available, provide a reasonable illustrative estimate rather than omitting it.'
+        'Write an executive procurement report grounded strictly in the document data below. '
+        'You decide the structure — choose whatever sections genuinely fit what this data actually '
+        'contains (for example: Executive Summary, Spend Breakdown, Risk Flags, Contract Expiries, '
+        'Vendor Performance, Recommendations — use only the ones the data supports, and add others '
+        'if something else stands out). Do not force content into sections the data doesn\'t support.'
+        f'{focus_line}\n\n'
+        'Return ONLY valid JSON (no markdown code fences, no comments) with keys: report_markdown, '
+        'chart_title, chart_type, chart_data.\n'
+        '"report_markdown" is the full report as a Markdown string (use "## " headers, bullet points, '
+        '**bold** for figures, and tables where useful) — this is the main content, written in your own '
+        'judgment, not a fixed template. Every figure, name, and date in it must trace back to the real '
+        'document data shown below.\n'
+        '"chart_type" is "bar", "pie", or "line" — ONLY include a chart if the data genuinely has a '
+        'quantitative breakdown worth visualizing (e.g. spend by category, vendor count by risk level). '
+        'If nothing in the real data supports a meaningful chart, set chart_type and chart_data to null/empty '
+        '— never invent illustrative or placeholder numbers to fill a chart. "chart_data", when present, is '
+        'an array of 3-8 real objects shaped like {"name": "<label>", "value": <number>}, drawn from actual '
+        'figures in the document data, not estimates.'
+        f"{context_block}"
     )
-    body = f"{prompt}\n\nInput:\n{json.dumps(input_data, indent=2)}"
-    response = create_chat_completion([{'role': 'system', 'content': load_system_prompt()}, {'role': 'user', 'content': body}], max_tokens=1200)
+
+    response = create_chat_completion(
+        [{'role': 'system', 'content': load_system_prompt()}, {'role': 'user', 'content': prompt}],
+        max_tokens=2200,
+    )
     text = response.choices[0].message.content
 
     try:
         parsed = _extract_json(text)
     except Exception:
         parsed = {
-            'report_type': input_data.get('report_type', 'spend'),
-            'executive_summary': text,
-            'key_findings': [],
+            'report_markdown': 'Could not generate a structured report from this document — try again, or try a more specific request.',
             'chart_title': None,
             'chart_type': None,
             'chart_data': [],
         }
+
+    if isinstance(parsed.get('report_markdown'), (dict, list)):
+        parsed['report_markdown'] = json.dumps(parsed['report_markdown'])
+    parsed.setdefault('report_markdown', text if isinstance(text, str) else '')
 
     parsed['chart_data'] = _sanitize_chart_data(parsed.get('chart_data'))
     parsed['chart_type'] = parsed.get('chart_type') if parsed.get('chart_type') in ('bar', 'pie', 'line') else None
     if not parsed['chart_data']:
         parsed['chart_type'] = None
     parsed.setdefault('chart_title', None)
-    parsed.setdefault('key_findings', [])
 
     return parsed
 

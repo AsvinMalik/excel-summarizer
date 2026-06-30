@@ -90,6 +90,27 @@ const AnalysisNote = ({ text }) => {
   );
 };
 
+const ReportMarkdown = ({ text }) => {
+  if (!text) return null;
+  return (
+    <div className="prose prose-sm max-w-none text-slate-700 prose-headings:font-semibold prose-headings:text-slate-900">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          table: ({ node, ...props }) => <table className="w-full border-collapse my-3 text-sm" {...props} />,
+          thead: ({ node, ...props }) => <thead className="bg-slate-100" {...props} />,
+          tr: ({ node, ...props }) => <tr className="even:bg-slate-50" {...props} />,
+          th: ({ node, ...props }) => <th className="border border-slate-300 px-3 py-2 text-left font-semibold text-slate-700" {...props} />,
+          td: ({ node, ...props }) => <td className="border border-slate-200 px-3 py-2 align-top" {...props} />,
+          pre: ({ node, ...props }) => <pre className="whitespace-pre-wrap break-words overflow-x-auto rounded-md bg-slate-900 text-slate-100 p-3 text-xs" {...props} />,
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+};
+
 const PRIORITY_STYLES = {
   high: 'bg-rose-50 text-rose-700 border-rose-200',
   medium: 'bg-amber-50 text-amber-700 border-amber-200',
@@ -200,13 +221,7 @@ const blankRfqInput = () => ({
 const RFQBuilder = ({ documents = [], activeDoc = null, sessionId }) => {
   const [activeTab, setActiveTab] = useState('rfq');
   const [rfqInput, setRfqInput] = useState(blankRfqInput());
-  const [reportInput, setReportInput] = useState({
-    report_type: 'spend',
-    title: 'Spend and Renewal Analysis',
-    scope: 'All strategic vendors and high renewal risk contracts',
-    timeframe: 'Last 12 months',
-    filters: 'High-risk vendors, expiring contracts, top 10 spend categories',
-  });
+  const [reportFocus, setReportFocus] = useState('');
   const [rfqDraft, setRfqDraft] = useState(null);
   const [reportDraft, setReportDraft] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -317,7 +332,7 @@ const RFQBuilder = ({ documents = [], activeDoc = null, sessionId }) => {
     setLoading(true);
     setError(null);
     try {
-      const response = await generateReport({ input: reportInput });
+      const response = await generateReport({ sessionId, context: buildDocumentContext(), focus: reportFocus.trim() || undefined });
       setReportDraft(response);
     } catch (err) {
       setError(err.message);
@@ -575,60 +590,35 @@ const RFQBuilder = ({ documents = [], activeDoc = null, sessionId }) => {
           )
         ) : (
           <div className="mt-8 space-y-6">
-            <label className="block">
-              <span className="text-sm font-medium text-slate-700">Report title</span>
-              <input
-                value={reportInput.title}
-                onChange={(e) => setReportInput((prev) => ({ ...prev, title: e.target.value }))}
-                className="mt-2 w-full rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900"
-              />
-            </label>
-            <label className="block">
-              <span className="text-sm font-medium text-slate-700">Scope</span>
-              <textarea
-                value={reportInput.scope}
-                onChange={(e) => setReportInput((prev) => ({ ...prev, scope: e.target.value }))}
-                rows={3}
-                className="mt-2 w-full rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900"
-              />
-            </label>
-            <div className="grid gap-4 lg:grid-cols-2">
-              <label className="block">
-                <span className="text-sm font-medium text-slate-700">Report type</span>
-                <select
-                  value={reportInput.report_type}
-                  onChange={(e) => setReportInput((prev) => ({ ...prev, report_type: e.target.value }))}
-                  className="mt-2 w-full rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900"
-                >
-                  <option value="spend">Spend Analysis</option>
-                  <option value="vendor">Vendor Summary</option>
-                  <option value="risk">Risk Assessment</option>
-                </select>
-              </label>
-              <label className="block">
-                <span className="text-sm font-medium text-slate-700">Timeframe</span>
-                <input
-                  value={reportInput.timeframe}
-                  onChange={(e) => setReportInput((prev) => ({ ...prev, timeframe: e.target.value }))}
-                  className="mt-2 w-full rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900"
-                />
-              </label>
+            <div className="rounded-3xl border border-slate-200 bg-gradient-to-br from-sky-50 to-blue-50 p-5">
+              <p className="text-sm font-semibold text-slate-900">AI-structured executive report</p>
+              <p className="mt-1 text-xs text-slate-600">
+                The report's sections, findings, and chart (if the data supports one) are determined by the AI from your
+                uploaded document — not a fixed template. Optionally tell it what to focus on below.
+              </p>
             </div>
+
+            {documents.length === 0 && (
+              <p className="text-xs text-slate-500">Upload a contract or vendor spreadsheet in the Assistant tab first.</p>
+            )}
+
             <label className="block">
-              <span className="text-sm font-medium text-slate-700">Filters</span>
+              <span className="text-sm font-medium text-slate-700">Focus (optional)</span>
               <textarea
-                value={reportInput.filters}
-                onChange={(e) => setReportInput((prev) => ({ ...prev, filters: e.target.value }))}
+                value={reportFocus}
+                onChange={(e) => setReportFocus(e.target.value)}
                 rows={3}
+                placeholder="e.g. focus on contracts expiring this quarter, or on vendor risk"
                 className="mt-2 w-full rounded-3xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900"
               />
             </label>
+
             <button
               onClick={handleGenerateReport}
-              disabled={loading}
+              disabled={loading || documents.length === 0}
               className="inline-flex items-center gap-2 rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:opacity-50"
             >
-              <ShieldCheck size={18} /> Generate Report Draft
+              <ShieldCheck size={18} /> {loading ? 'Generating…' : 'Generate Report'}
             </button>
             {error && <p className="text-sm text-rose-600">{error}</p>}
           </div>
@@ -682,22 +672,13 @@ const RFQBuilder = ({ documents = [], activeDoc = null, sessionId }) => {
         ) : reportDraft ? (
           <div className="mt-6 space-y-4">
             <div className="rounded-3xl border border-slate-200 bg-white p-5">
-              <p className="text-sm uppercase tracking-[0.24em] text-slate-500">Report summary</p>
-              <p className="mt-3 text-sm leading-6 text-slate-700">{reportDraft.executive_summary}</p>
+              <ReportMarkdown text={reportDraft.report_markdown} />
             </div>
             <ReportChart
               chartType={reportDraft.chart_type}
               chartData={reportDraft.chart_data}
               chartTitle={reportDraft.chart_title}
             />
-            <div className="rounded-3xl border border-slate-200 bg-white p-5">
-              <p className="text-sm uppercase tracking-[0.24em] text-slate-500">Key findings</p>
-              <ul className="mt-3 space-y-2 text-sm text-slate-700">
-                {reportDraft.key_findings.map((item, index) => (
-                  <li key={index}>• {item}</li>
-                ))}
-              </ul>
-            </div>
           </div>
         ) : (
           <div className="mt-6 rounded-3xl border border-dashed border-slate-300 bg-white p-8 text-center text-sm text-slate-500">
