@@ -2,7 +2,8 @@ import json
 import os
 import re
 import sys
-from typing import Any, Dict
+from datetime import datetime
+from typing import Any, Dict, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ai_orchestrator import create_chat_completion
@@ -39,7 +40,65 @@ def build_document_context_block(document_context: dict = None) -> str:
     return context_block
 
 
+# Structural questions about a document's shape (sheet count, sheet names, row count)
+# have one objectively correct answer that we already know exactly from parsing the
+# file. Answering these directly — instead of asking an LLM to "count" from a text
+# preview — is instant, free, and can never hallucinate, regardless of which AI
+# provider/model is active. Covers common typos (e.g. "sdheets") since the keyword
+# match is substring-based, not exact-word.
+_SHEET_KEYWORDS = ('sheet', 'sdheet', 'shdeet', 'tab', 'worksheet')
+_COUNT_KEYWORDS = ('how many', 'number of', 'count of', 'total number')
+_NAME_KEYWORDS = ('name', 'list', 'which', 'what are')
+_ROW_KEYWORDS = ('how many row', 'number of row', 'row count', 'total row')
+
+
+def _try_answer_structural_question(user_query: str, document_context: dict = None) -> Optional[str]:
+    query_lower = user_query.lower()
+    documents = (document_context or {}).get('documents') or []
+    active_document = (document_context or {}).get('active_document')
+    target_docs = [d for d in ([active_document] if active_document else documents) if d]
+
+    if not target_docs:
+        return None
+
+    mentions_sheets = any(k in query_lower for k in _SHEET_KEYWORDS)
+    asks_count = any(k in query_lower for k in _COUNT_KEYWORDS)
+    asks_names = mentions_sheets and any(k in query_lower for k in _NAME_KEYWORDS)
+    asks_rows = any(k in query_lower for k in _ROW_KEYWORDS)
+
+    if not ((asks_count and mentions_sheets) or asks_names or asks_rows):
+        return None
+
+    lines = []
+    for doc in target_docs:
+        name = doc.get('name', 'Unknown')
+        sheet_names = doc.get('sheet_names')
+        row_count = doc.get('row_count')
+
+        if asks_rows and not (asks_count and mentions_sheets) and not asks_names:
+            lines.append(f"**{name}** has **{row_count if row_count is not None else 'an unknown number of'} rows** total across all sheets.")
+            continue
+
+        if sheet_names:
+            lines.append(f"**{name}** has **{len(sheet_names)} sheet(s)**: {', '.join(sheet_names)}.")
+            if row_count is not None:
+                lines.append(f"({row_count} rows total across all sheets.)")
+        else:
+            lines.append(f"**{name}** is a single-sheet file" + (f" with **{row_count} rows**." if row_count is not None else "."))
+
+    return '\n'.join(lines) if lines else None
+
+
 def procure_agent(user_query: str, document_context: dict = None, session_state: dict = None) -> dict:
+    structural_answer = _try_answer_structural_question(user_query, document_context)
+    if structural_answer:
+        return {
+            'timestamp': int(datetime.utcnow().timestamp()),
+            'model': 'deterministic',
+            'content': [{'type': 'text', 'text': structural_answer}],
+            'tool_calls': [],
+        }
+
     system_prompt = load_system_prompt()
     messages = [
         {'role': 'system', 'content': system_prompt}
