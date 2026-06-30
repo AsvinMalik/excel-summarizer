@@ -138,6 +138,10 @@ def _enrich_doc(doc: dict) -> dict:
         'data_preview': preview[:DATA_PREVIEW_CHAR_LIMIT],
         'data_preview_truncated': truncated,
         'profile': stored.get('profile'),
+        # Server-local path, never echoed back in any API response — used internally so
+        # the query engine can re-read the FULL workbook on demand instead of operating
+        # on the (possibly truncated) text preview.
+        'file_path': stored.get('file_path'),
     }
 
 

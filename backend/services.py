@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ai_orchestrator import create_chat_completion
 from data_profiler import format_profile_block
+from query_engine import load_all_sheets, execute_query_spec
 
 BASE_PROMPT_PATH = os.path.join(os.path.dirname(__file__), '..', 'agent_system_prompt.txt')
 
@@ -144,6 +145,235 @@ def _try_refuse_empty_document_request(user_query: str, document_context: dict =
     return None
 
 
+# Quantitative/filtering/ranking questions ("total spend", "top 5 vendors", "vendors
+# over $1M") can be answered with verified pandas execution instead of an LLM reading
+# a text preview. Gate on keywords first so the extra spec-generation model call only
+# fires for questions that actually look like data queries — a qualitative question
+# like "summarize this contract" never pays that cost. Word-boundary regex, not plain
+# substring match — a naive `'sum' in query` false-positives on "Summarize"/"summary".
+_DATA_QUERY_GATE_RE = re.compile(
+    r'\btotal\b|\bsum\b|\baverage\b|\bavg\b|\bmean\b|\bcount\b|\bhow many\b|\bhow much\b|'
+    r'\btop\s+\d+\b|\bbottom\s+\d+\b|\bhighest\b|\blowest\b|\bmaximum\b|\bminimum\b|\bmax\b|\bmin\b|'
+    r'\bgreater than\b|\bless than\b|\bmore than\b|\bover\b|\bunder\b|\babove\b|\bbelow\b|\bbetween\b|'
+    r'\brank\b|\bgroup(?:ed)?\s+by\b|\bbreakdown\b|\bby region\b|\bby category\b',
+    re.IGNORECASE,
+)
+
+# Weaker local models (Phi3) are inconsistent at filling every spec field correctly
+# in one shot — e.g. dropping "sort" on a "top N" question, or inventing a spurious
+# filter on a plain group-by question. Rather than trust the model's JSON blindly,
+# re-derive the unambiguous parts directly from the question's literal phrasing and
+# let those override the model's guess. Regex on the user's own words can't
+# hallucinate the way free-text generation can.
+_TOP_N_RE = re.compile(r'\btop\s+(\d+)\b', re.IGNORECASE)
+_BOTTOM_N_RE = re.compile(r'\b(?:bottom|lowest)\s+(\d+)\b', re.IGNORECASE)
+_GROUP_BY_RE = re.compile(r'\b(?:group(?:ed)?\s+by|broken\s+down\s+by|per)\s+([a-zA-Z][\w \-/]{1,40}?)(?:[?.,]|$)', re.IGNORECASE)
+_BY_COLUMN_RE = re.compile(r'\bby\s+([a-zA-Z][\w \-/]{1,40}?)(?:[?.,]|$)', re.IGNORECASE)
+_FILTER_KEYWORDS = ('over', 'above', 'under', 'below', 'greater', 'less', 'more than', 'at least', 'at most', 'between', '>', '<', '=')
+_HAS_NUMBER_RE = re.compile(r'\d')
+# "which vendor has the lowest spend" / "what is the most expensive item" — this wants
+# a single ROW (the entity), not a bare aggregate number. Captures the superlative word
+# and the term right after it (e.g. "lowest spend" -> direction=lowest, term=spend).
+_SUPERLATIVE_ROW_RE = re.compile(
+    r'\b(?:which|what|who)\b[^.?!]{0,40}?\b(highest|lowest|top|maximum|minimum|max|min|most|least|cheapest|most expensive)\b\s+([a-zA-Z][\w \-/]{1,30})',
+    re.IGNORECASE,
+)
+_EXPLICIT_AGG_RE = re.compile(r'\btotal\b|\bsum\b|\baverage\b|\bcount\b|\bmean\b', re.IGNORECASE)
+_LOW_DIRECTION_WORDS = {'lowest', 'minimum', 'min', 'least', 'cheapest'}
+
+
+def _find_column_for_term(term: str, columns: list) -> Optional[str]:
+    term = term.strip().lower()
+    for col in columns:
+        col_lower = col.lower()
+        if term == col_lower or term in col_lower or col_lower in term:
+            return col
+    return None
+
+
+def _apply_deterministic_overrides(user_query: str, spec: dict, columns: list) -> dict:
+    spec = dict(spec)
+    query_lower = user_query.lower()
+
+    top_match = _TOP_N_RE.search(user_query)
+    bottom_match = _BOTTOM_N_RE.search(user_query)
+    group_match = _GROUP_BY_RE.search(user_query)
+
+    if group_match and not spec.get('group_by'):
+        found = _find_column_for_term(group_match.group(1), columns)
+        if found:
+            spec['group_by'] = found
+
+    # Weak models frequently drop "column" for ranking questions ("top 3 vendors BY
+    # Annual Spend") even when told to keep it — re-derive it from the literal "by X"
+    # phrase in the question whenever the model left it null.
+    if not spec.get('column'):
+        by_match = _BY_COLUMN_RE.search(user_query)
+        if by_match:
+            found = _find_column_for_term(by_match.group(1), columns)
+            if found:
+                spec['column'] = found
+
+    if top_match:
+        # The regex match on the user's literal words is a stronger signal than the
+        # model's own sort/limit guess — always override, don't just fill gaps. Seen
+        # in testing: a model asked for "bottom 2" still emitted sort:"desc".
+        spec['limit'] = int(top_match.group(1))
+        spec['sort'] = 'desc'
+        if not spec.get('group_by'):
+            # Plain "top N <rows> by <column>" ranks individual rows, not an aggregate —
+            # force the rows/sort/limit path even if the model guessed an operation.
+            spec['operation'] = None
+    elif bottom_match:
+        spec['limit'] = int(bottom_match.group(1))
+        spec['sort'] = 'asc'
+        if not spec.get('group_by'):
+            spec['operation'] = None
+    else:
+        superlative_match = _SUPERLATIVE_ROW_RE.search(user_query)
+        if superlative_match and not _EXPLICIT_AGG_RE.search(query_lower) and not spec.get('group_by'):
+            found = _find_column_for_term(superlative_match.group(2), columns)
+            if found:
+                spec['column'] = found
+            spec['operation'] = None
+            spec['sort'] = 'asc' if superlative_match.group(1).lower() in _LOW_DIRECTION_WORDS else 'desc'
+            spec['limit'] = 1
+
+    # Only trust the model's filters if the question actually contains comparison
+    # language + a number — otherwise a stray filter on a plain aggregation/group-by
+    # question silently zeroes out every row.
+    has_filter_language = any(k in query_lower for k in _FILTER_KEYWORDS) and bool(_HAS_NUMBER_RE.search(query_lower))
+    if not has_filter_language and spec.get('filters'):
+        spec['filters'] = []
+
+    return spec
+
+
+def _format_query_result(spec: dict, result: dict) -> str:
+    sheet = spec.get('sheet', 'Unknown')
+
+    if result['type'] == 'scalar':
+        op_label = {'sum': 'Total', 'mean': 'Average', 'count': 'Count', 'min': 'Minimum', 'max': 'Maximum', 'median': 'Median'}.get(result['operation'], result['operation'].title())
+        value = result['value']
+        value_text = f'{value:,.2f}' if isinstance(value, (int, float)) else str(value)
+        scope_note = f"{result['matched_row_count']} matching row(s)" if spec.get('filters') else f"{result['matched_row_count']} row(s)"
+        return (
+            f'**{op_label} of "{result["column"]}"**: {value_text}\n\n'
+            f'*Computed directly from the full dataset — {scope_note} in Sheet "{sheet}".*'
+        )
+
+    if result['type'] == 'grouped':
+        rows = result['rows']
+        if not rows:
+            return f'No matching data found in Sheet "{sheet}" for that grouping.'
+        group_col = result['group_by']
+        value_col = result['value_col']
+        value_header = 'Count' if result['operation'] == 'count' else f'{result["operation"].title()} of {result["column"]}'
+        lines = [f'| {group_col} | {value_header} |', '|---|---|']
+        for row in rows:
+            val = row.get(value_col)
+            val_text = f'{val:,.2f}' if isinstance(val, (int, float)) else str(val)
+            lines.append(f'| {row.get(group_col)} | {val_text} |')
+        lines.append('')
+        lines.append(f'*{result["matched_row_count"]} matching row(s) in Sheet "{sheet}", computed directly from the full dataset.*')
+        return '\n'.join(lines)
+
+    rows = result['rows']
+    if not rows:
+        return f'No rows in Sheet "{sheet}" matched that filter.'
+    cols = result['columns']
+    lines = ['| ' + ' | '.join(str(c) for c in cols) + ' |', '|' + '---|' * len(cols)]
+    for row in rows:
+        lines.append('| ' + ' | '.join(str(row.get(c, '')) for c in cols) + ' |')
+    lines.append('')
+    lines.append(f'*Showing {len(rows)} of {result["matched_row_count"]} matching row(s) in Sheet "{sheet}".*')
+    return '\n'.join(lines)
+
+
+def _try_answer_data_query(user_query: str, document_context: dict = None) -> Optional[str]:
+    if not _DATA_QUERY_GATE_RE.search(user_query):
+        return None
+
+    documents = (document_context or {}).get('documents') or []
+    active_document = (document_context or {}).get('active_document')
+    target_docs = [
+        d for d in ([active_document] if active_document else documents)
+        if d and d.get('file_path') and d.get('profile')
+    ]
+    if not target_docs:
+        return None
+    doc = target_docs[0]
+
+    sheet_column_map = {
+        sheet_name: [c['name'] for c in sheet_profile.get('columns', [])]
+        for sheet_name, sheet_profile in (doc.get('profile') or {}).items()
+    }
+    if not sheet_column_map:
+        return None
+
+    spec_prompt = (
+        'Translate this data question into a structured query spec to be executed exactly with pandas. '
+        'Do NOT attempt to answer the question yourself — only describe how to compute it.\n\n'
+        f'User question: "{user_query}"\n\n'
+        'Available sheets and their REAL column names (use these exact names, case-sensitive):\n'
+        f'{json.dumps(sheet_column_map, indent=2)}\n\n'
+        'Return ONLY valid JSON (no markdown fences, no comments) with this exact shape:\n'
+        '{"answerable": true|false, "sheet": "<exact sheet name>", "column": "<exact numeric column name or null>", '
+        '"operation": "sum"|"mean"|"count"|"min"|"max"|"median"|null, "group_by": "<exact column name or null>", '
+        '"filters": [{"column": "<exact column name>", "op": ">"|">="|"<"|"<="|"=="|"!=", "value": <number or string>}], '
+        '"sort": "asc"|"desc"|null, "limit": <int or null>}\n\n'
+        'Four worked examples (column names below are illustrative — always substitute the REAL column names from '
+        'the sheet list above, never these literal example names):\n'
+        '1. "What is the total Spend?" -> single number, no breakdown, no row list needed:\n'
+        '   {"answerable": true, "sheet": "Sheet1", "column": "Spend", "operation": "sum", "group_by": null, '
+        '"filters": [], "sort": null, "limit": null}\n'
+        '2. "Show total spend grouped by Region" -> one aggregated number PER region, so group_by is set:\n'
+        '   {"answerable": true, "sheet": "Sheet1", "column": "Spend", "operation": "sum", "group_by": "Region", '
+        '"filters": [], "sort": null, "limit": null}\n'
+        '3. "Top 3 vendors by spend" -> this ranks individual ROWS, it is NOT an aggregation — leave operation and '
+        'group_by null, and use sort+limit instead. Never put the ranking criterion in "filters":\n'
+        '   {"answerable": true, "sheet": "Sheet1", "column": "Spend", "operation": null, "group_by": null, '
+        '"filters": [], "sort": "desc", "limit": 3}\n'
+        '4. "How many vendors have spend over 1,000,000?" -> a count of matching rows; "column" stays null since '
+        'no specific column is being aggregated, only counted:\n'
+        '   {"answerable": true, "sheet": "Sheet1", "column": null, "operation": "count", "group_by": null, '
+        '"filters": [{"column": "Spend", "op": ">", "value": 1000000}], "sort": null, "limit": null}\n\n'
+        'Set "answerable" to false (with other fields null/empty) if this question needs joining multiple sheets, '
+        'reading free-text/narrative content, or anything beyond a single-sheet aggregation/filter/group-by/ranking. '
+        'Never invent a sheet or column name that is not in the list above — if there is no confident match, set '
+        '"answerable" to false instead of guessing.'
+    )
+
+    try:
+        response = create_chat_completion(
+            [
+                {'role': 'system', 'content': 'You translate data questions into structured pandas query specs. Output JSON only, nothing else.'},
+                {'role': 'user', 'content': spec_prompt},
+            ],
+            max_tokens=400,
+        )
+        spec = _extract_json(response.choices[0].message.content)
+    except Exception:
+        return None
+
+    if not isinstance(spec, dict) or not spec.get('answerable'):
+        return None
+
+    sheet_columns = sheet_column_map.get(spec.get('sheet'), [])
+    spec = _apply_deterministic_overrides(user_query, spec, sheet_columns)
+
+    try:
+        all_sheets = load_all_sheets(doc['file_path'])
+        result = execute_query_spec(all_sheets, spec)
+    except Exception:
+        # Covers QueryError (bad sheet/column from the spec) and any pandas failure.
+        # Never surface a broken/partial answer — fall through to the normal grounded
+        # LLM-with-profile-context flow instead.
+        return None
+
+    return _format_query_result(spec, result)
+
+
 def procure_agent(user_query: str, document_context: dict = None, session_state: dict = None) -> dict:
     structural_answer = _try_answer_structural_question(user_query, document_context)
     if structural_answer:
@@ -160,6 +390,15 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
             'timestamp': int(datetime.utcnow().timestamp()),
             'model': 'deterministic',
             'content': [{'type': 'text', 'text': refusal}],
+            'tool_calls': [],
+        }
+
+    data_query_answer = _try_answer_data_query(user_query, document_context)
+    if data_query_answer:
+        return {
+            'timestamp': int(datetime.utcnow().timestamp()),
+            'model': 'deterministic-query-engine',
+            'content': [{'type': 'text', 'text': data_query_answer}],
             'tool_calls': [],
         }
 
@@ -226,8 +465,17 @@ def _extract_json(text: str) -> dict:
     except json.JSONDecodeError:
         pass
 
+    # Weaker local models occasionally mangle a two-character comparison operator value
+    # like ">=" into invalid JSON such as "op": ">"="  (an extra quote splits the value).
+    # Collapse that back into a single quoted token before the final parse attempts.
+    operator_fixed = re.sub(r'"([<>])"\s*=\s*"', r'"\1="', no_comments)
+    try:
+        return json.loads(operator_fixed)
+    except json.JSONDecodeError:
+        pass
+
     # Last resort: grab the first balanced-looking {...} block in the text.
-    match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+    match = re.search(r'\{.*\}', operator_fixed, re.DOTALL)
     if match:
         return json.loads(match.group(0))
 
