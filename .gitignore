@@ -34,3 +34,6 @@ __pycache__/
 
 .vercel
 .env*
+
+# Claude Code harness artifacts
+.claude/

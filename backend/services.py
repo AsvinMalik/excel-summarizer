@@ -298,14 +298,17 @@ def detect_rfq_candidates(document_context: dict = None) -> dict:
 
     response = create_chat_completion(
         [{'role': 'system', 'content': load_system_prompt()}, {'role': 'user', 'content': prompt}],
-        max_tokens=1800,
+        max_tokens=2200,
     )
     text = response.choices[0].message.content
 
     try:
         parsed = _extract_json(text)
     except Exception:
-        parsed = {'candidates': [], 'analysis_note': text}
+        parsed = {
+            'candidates': [],
+            'analysis_note': 'Could not complete a structured analysis of this document — try again, or try a more specific document.',
+        }
 
     candidates = _sanitize_rfq_candidates(parsed.get('candidates'))
     priority_rank = {'high': 0, 'medium': 1, 'low': 2}

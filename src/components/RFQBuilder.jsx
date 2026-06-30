@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { Download, FileText, ShieldCheck, BarChart3, Sparkles, X, Clock, TrendingDown, AlertTriangle } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   ResponsiveContainer,
   BarChart,
@@ -63,6 +65,29 @@ const ReportChart = ({ chartType, chartData, chartTitle }) => {
 const formatValue = (value) => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return null;
   return `$${Number(value).toLocaleString('en-US')}`;
+};
+
+const NOTE_MAX_CHARS = 700;
+
+const AnalysisNote = ({ text }) => {
+  if (!text) return null;
+  const truncated = text.length > NOTE_MAX_CHARS ? `${text.slice(0, NOTE_MAX_CHARS)}…` : text;
+  return (
+    <div className="prose prose-sm max-w-none text-slate-600 prose-p:my-1 prose-headings:text-sm prose-headings:font-semibold prose-headings:my-1">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          table: ({ node, ...props }) => <table className="w-full border-collapse my-2 text-xs" {...props} />,
+          thead: ({ node, ...props }) => <thead className="bg-slate-100" {...props} />,
+          tr: ({ node, ...props }) => <tr className="even:bg-slate-50" {...props} />,
+          th: ({ node, ...props }) => <th className="border border-slate-300 px-2 py-1 text-left font-semibold text-slate-700" {...props} />,
+          td: ({ node, ...props }) => <td className="border border-slate-200 px-2 py-1 align-top" {...props} />,
+        }}
+      >
+        {truncated}
+      </ReactMarkdown>
+    </div>
+  );
 };
 
 const PRIORITY_STYLES = {
@@ -369,7 +394,7 @@ const RFQBuilder = ({ documents = [], activeDoc = null, sessionId }) => {
                     <span className="rounded-full bg-amber-50 border border-amber-200 px-3 py-1 font-semibold text-amber-700">{mediumCount} medium priority</span>
                     <span className="text-slate-500">{documentsAnalyzed} document(s) analyzed</span>
                   </div>
-                  {analysisNote && <p className="text-sm text-slate-600">{analysisNote}</p>}
+                  <AnalysisNote text={analysisNote} />
 
                   {visibleCandidates.length > 0 ? (
                     <div className="space-y-3">
