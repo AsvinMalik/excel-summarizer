@@ -222,6 +222,20 @@ def generate_rfq(input_data: dict) -> dict:
         if isinstance(value, (dict, list)):
             parsed[scalar_field] = json.dumps(value)
 
+    # The frontend renders these as <li>{item}</li> with no markdown/JSON handling — if the
+    # model returns objects instead of strings here (seen in testing with weaker models),
+    # React hard-crashes on render instead of degrading gracefully. Coerce defensively, same
+    # as refine_rfq_draft() does, rather than trusting the prompt instruction alone.
+    for array_field in ('scope_of_work', 'terms_and_conditions', 'requested_info', 'legal_certifications'):
+        parsed[array_field] = _coerce_string_array(parsed.get(array_field), input_data.get(array_field, []))
+    if isinstance(parsed.get('evaluation_criteria'), dict):
+        parsed['evaluation_criteria'] = {
+            str(k): (v if isinstance(v, str) else json.dumps(v) if isinstance(v, (dict, list)) else str(v))
+            for k, v in parsed['evaluation_criteria'].items()
+        }
+    else:
+        parsed['evaluation_criteria'] = input_data.get('evaluation_criteria', {})
+
     return parsed
 
 
@@ -356,7 +370,11 @@ def generate_report(document_context: dict = None, focus: str = None) -> dict:
         '"report_markdown" is the full report as a Markdown string (use "## " headers, bullet points, '
         '**bold** for figures, and tables where useful) — this is the main content, written in your own '
         'judgment, not a fixed template. Every figure, name, and date in it must trace back to the real '
-        'document data shown below.\n'
+        'document data shown below. If the sheet only has generic columns (e.g. "Item"/"Value") with no '
+        'real category, department, or vendor names in the cells, describe the data using its actual column '
+        'and sheet names — do NOT invent plausible-sounding business labels (department names, vendor names, '
+        'satisfaction scores, category names) just to make the report read more polished. A real number '
+        'wrapped in a fabricated label is still fabrication.\n'
         '"chart_type" is "bar", "pie", or "line" — ONLY include a chart if the data genuinely has a '
         'quantitative breakdown worth visualizing (e.g. spend by category, vendor count by risk level). '
         'If nothing in the real data supports a meaningful chart, set chart_type and chart_data to null/empty '
@@ -458,14 +476,19 @@ def _sanitize_rfq_candidates(raw_candidates) -> list:
         if not isinstance(item, dict) or not item.get('vendor'):
             continue
         reasons = item.get('reasons')
+        # expiry/source_document are rendered directly as JSX children on the frontend
+        # with no type guard — coerce to string (or None) so a stray nested object from
+        # the model can't crash the render.
+        expiry = item.get('expiry')
+        source_document = item.get('source_document')
         sanitized.append({
             'vendor': str(item['vendor']),
             'value': item.get('value'),
-            'expiry': item.get('expiry'),
+            'expiry': expiry if isinstance(expiry, (str, type(None))) else str(expiry),
             'score': item.get('score'),
             'reasons': [str(r) for r in reasons] if isinstance(reasons, list) else [],
             'priority': item.get('priority') if item.get('priority') in _VALID_PRIORITIES else 'medium',
-            'source_document': item.get('source_document'),
+            'source_document': source_document if isinstance(source_document, (str, type(None))) else str(source_document),
         })
     return sanitized
 
@@ -587,5 +610,18 @@ def extract_rfq_template(document_context: dict, vendor: str) -> dict:
         value = parsed.get(scalar_field)
         if isinstance(value, (dict, list)):
             parsed[scalar_field] = json.dumps(value)
+
+    # Same crash-prevention as generate_rfq(): the frontend renders these as plain
+    # <li>{item}</li> with no defensive handling, so a stray object/dict item would
+    # hard-crash the React render instead of degrading gracefully.
+    for array_field in ('scope_of_work', 'terms_and_conditions', 'requested_info', 'legal_certifications'):
+        parsed[array_field] = _coerce_string_array(parsed.get(array_field), [])
+    if isinstance(parsed.get('evaluation_criteria'), dict):
+        parsed['evaluation_criteria'] = {
+            str(k): (v if isinstance(v, str) else json.dumps(v) if isinstance(v, (dict, list)) else str(v))
+            for k, v in parsed['evaluation_criteria'].items()
+        }
+    else:
+        parsed['evaluation_criteria'] = {}
 
     return parsed
