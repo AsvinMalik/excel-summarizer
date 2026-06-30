@@ -550,6 +550,24 @@ def generate_report(document_context: dict = None, focus: str = None) -> dict:
             parsed['chart_data'] = []
             return parsed
 
+    # General safety net for BOTH report modes: a model defaulting to a generic
+    # corporate-report template produces literal placeholder brackets like
+    # "[Your Name/Title]", "[Company Name]", "[Current Fiscal Year]" instead of real
+    # content — sometimes alongside an entirely invented contact person (seen directly
+    # in testing: a fabricated "Dr. Jane Doe" with a fake email and phone number).
+    # Require a space inside the brackets (multi-word) so legitimate short labels like
+    # "[HIGH]"/"[PENDING]" aren't flagged — only template-style phrases are.
+    placeholder_match = re.search(r'\[[^\[\]\(\)]*\s[^\[\]\(\)]*\](?!\()', parsed.get('report_markdown') or '')
+    if placeholder_match:
+        parsed['report_markdown'] = (
+            f'The generated report used template placeholder text (e.g. "{placeholder_match.group(0)}") instead '
+            'of real content from your document — discarded rather than shown. Please try again.'
+        )
+        parsed['chart_title'] = None
+        parsed['chart_type'] = None
+        parsed['chart_data'] = []
+        return parsed
+
     parsed['chart_data'] = _sanitize_chart_data(parsed.get('chart_data'))
     parsed['chart_type'] = parsed.get('chart_type') if parsed.get('chart_type') in ('bar', 'pie', 'line') else None
     if not parsed['chart_data']:

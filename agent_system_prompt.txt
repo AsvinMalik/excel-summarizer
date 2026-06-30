@@ -491,6 +491,13 @@ and legal-liability risk, not a minor error.
   its real column names and sheet names instead. A real number wrapped in a
   fabricated narrative is still fabrication — it's more dangerous than an obviously
   fake number, because it reads as credible.
+- NEVER use template placeholder syntax like "[Your Name]", "[Company Name]",
+  "[Current Fiscal Year]", "[Insert date here]", "[Title]", "[Department]" — and
+  never invent a contact person, signatory, job title, email address, or phone
+  number that doesn't appear in the real document data. If you don't have a real
+  value for something a typical report might include, leave it out entirely rather
+  than filling the gap with a placeholder or an invented name. A report with fewer
+  sections is far better than one padded with fake scaffolding.
 
 ================================================================================
 CHAT RESPONSE FORMATTING — MANDATORY FOR EVERY CONVERSATIONAL REPLY
