@@ -27,10 +27,14 @@ def build_document_context_block(document_context: dict = None) -> str:
         marker = ' (currently viewing)' if active_doc_id and doc.get('doc_id') == active_doc_id else ''
         context_block += f"\n- {doc.get('name', 'Unknown')}{marker}: type={doc.get('type', 'unknown')}, status={doc.get('status', 'unknown')}\n"
         if doc.get('data_preview'):
+            sheet_names = doc.get('sheet_names') or []
+            if len(sheet_names) > 1:
+                context_block += f"  Sheets ({len(sheet_names)}): {', '.join(sheet_names)}\n"
+            else:
+                context_block += f"  Columns: {', '.join(doc.get('columns') or [])}\n"
             context_block += (
-                f"  Columns: {', '.join(doc.get('columns') or [])}\n"
                 f"  Row count: {doc.get('row_count', 'unknown')}\n"
-                f"  Data sample (CSV{', truncated' if doc.get('data_preview_truncated') else ''}):\n{doc['data_preview']}\n"
+                f"  Data sample (CSV{', truncated' if doc.get('data_preview_truncated') else ''}), grouped by sheet below:\n{doc['data_preview']}\n"
             )
     return context_block
 

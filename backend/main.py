@@ -105,7 +105,7 @@ DOCUMENT_STORE = {}
 SESSION_STORE = {}
 TASK_STORE = {}
 
-DATA_PREVIEW_CHAR_LIMIT = 3000
+DATA_PREVIEW_CHAR_LIMIT = 24000  # raised from 3000 to fit multi-sheet workbooks (was truncating to sheet 1 only)
 
 
 def _enrich_doc(doc: dict) -> dict:
@@ -120,6 +120,7 @@ def _enrich_doc(doc: dict) -> dict:
         **doc,
         'row_count': stored.get('row_count'),
         'columns': stored.get('columns'),
+        'sheet_names': stored.get('sheet_names'),
         'data_preview': preview[:DATA_PREVIEW_CHAR_LIMIT],
         'data_preview_truncated': truncated,
     }
@@ -338,12 +339,28 @@ def queue_document_processing(doc_id: str, file_path: str, file_type: str, compa
         doc_data = DOCUMENT_STORE.get(doc_id)
         if doc_data and doc_data.get("bytes"):
             file_bytes = doc_data["bytes"]
-            df = pd.read_excel(io.BytesIO(file_bytes))
-            # Convert first 100 rows to CSV string to avoid massive context blowouts
-            csv_preview = df.head(100).to_csv(index=False)
+            # sheet_name=None reads every sheet in the workbook (returns {name: DataFrame}),
+            # not just the first one — a single-sheet read here was the original bug.
+            all_sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None)
+            sheet_names = list(all_sheets.keys())
+            total_rows = sum(len(df) for df in all_sheets.values())
+
+            # Scale rows-per-sheet down as sheet count grows, so a 27-tab workbook doesn't
+            # blow the context budget while a 1-2 sheet file still gets a generous preview.
+            rows_per_sheet = max(5, min(100, 800 // max(len(all_sheets), 1)))
+
+            sheet_sections = []
+            for name, df in all_sheets.items():
+                header = f"=== Sheet: {name} ({len(df)} rows x {len(df.columns)} cols) ==="
+                cols_line = f"Columns: {', '.join(str(c) for c in df.columns)}"
+                csv_body = df.head(rows_per_sheet).to_csv(index=False)
+                sheet_sections.append(f"{header}\n{cols_line}\n{csv_body}")
+            csv_preview = "\n\n".join(sheet_sections)
+
             DOCUMENT_STORE[doc_id]["parsed_csv"] = csv_preview
-            DOCUMENT_STORE[doc_id]["row_count"] = len(df)
-            DOCUMENT_STORE[doc_id]["columns"] = df.columns.tolist()
+            DOCUMENT_STORE[doc_id]["row_count"] = total_rows
+            DOCUMENT_STORE[doc_id]["columns"] = all_sheets[sheet_names[0]].columns.tolist()
+            DOCUMENT_STORE[doc_id]["sheet_names"] = sheet_names
             DOCUMENT_STORE[doc_id]["status"] = "ready"
             TASK_STORE[task_id]["status"] = "completed"
     except Exception as e:
