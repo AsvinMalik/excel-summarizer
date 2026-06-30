@@ -52,7 +52,16 @@ _NAME_KEYWORDS = ('name', 'list', 'which', 'what are')
 _ROW_KEYWORDS = ('how many row', 'number of row', 'row count', 'total row')
 
 
+_STRUCTURAL_QUERY_MAX_CHARS = 100  # genuine structural questions are always short; long
+                                    # instructional prompts (e.g. quick-action templates)
+                                    # must never trigger this, even if they happen to
+                                    # contain a stray word like "list" or "data sheet"
+
+
 def _try_answer_structural_question(user_query: str, document_context: dict = None) -> Optional[str]:
+    if len(user_query) > _STRUCTURAL_QUERY_MAX_CHARS:
+        return None
+
     query_lower = user_query.lower()
     documents = (document_context or {}).get('documents') or []
     active_document = (document_context or {}).get('active_document')
@@ -75,16 +84,23 @@ def _try_answer_structural_question(user_query: str, document_context: dict = No
         sheet_names = doc.get('sheet_names')
         row_count = doc.get('row_count')
 
+        # row_count is only ever None when this document was never actually parsed in
+        # the current backend session (e.g. the server restarted since it was uploaded,
+        # wiping the in-memory store) — never assert "single-sheet" in that case, since
+        # we genuinely don't know. A real single-sheet file always has sheet_names=[one
+        # name] once parsed, since pandas returns at least one sheet on success.
+        if row_count is None:
+            lines.append(f"I don't have parsed data for **{name}** right now — please re-upload it and ask again.")
+            continue
+
         if asks_rows and not (asks_count and mentions_sheets) and not asks_names:
-            lines.append(f"**{name}** has **{row_count if row_count is not None else 'an unknown number of'} rows** total across all sheets.")
+            lines.append(f"**{name}** has **{row_count} rows** total across all sheets.")
             continue
 
         if sheet_names:
-            lines.append(f"**{name}** has **{len(sheet_names)} sheet(s)**: {', '.join(sheet_names)}.")
-            if row_count is not None:
-                lines.append(f"({row_count} rows total across all sheets.)")
+            lines.append(f"**{name}** has **{len(sheet_names)} sheet(s)**: {', '.join(sheet_names)}. ({row_count} rows total.)")
         else:
-            lines.append(f"**{name}** is a single-sheet file" + (f" with **{row_count} rows**." if row_count is not None else "."))
+            lines.append(f"**{name}** has **{row_count} rows**.")
 
     return '\n'.join(lines) if lines else None
 
