@@ -384,47 +384,106 @@ def generate_report(document_context: dict = None, focus: str = None) -> dict:
     documents = (document_context or {}).get('documents') or []
     context_block = build_document_context_block(document_context)
 
-    if not documents:
+    # Listing a document name isn't the same as having its real content. A document
+    # can be present in the `documents` array but have no data_preview at all — e.g.
+    # the backend restarted since it was uploaded, wiping the in-memory store the
+    # doc_id pointed to. In that case the AI sees a filename with nothing behind it
+    # and fabricates a full report to fill the gap (observed directly in testing).
+    # Require actual parsed content, not just a non-empty list, before proceeding.
+    documents_with_data = [d for d in documents if d.get('data_preview')]
+
+    if not documents_with_data:
         return {
             'report_markdown': (
-                'No documents have been uploaded to this session yet. Upload a contract or '
-                'spend/vendor spreadsheet first, then generate a report from its real data.'
+                'No usable document data is available in this session right now — either nothing has been '
+                'uploaded yet, or the upload(s) listed have no readable content (try re-uploading if you '
+                'believe this is wrong). Upload a contract or spend/vendor spreadsheet, then generate a '
+                'report from its real data.'
             ),
             'chart_title': None,
             'chart_type': None,
             'chart_data': [],
         }
 
+    # If any uploaded document is a multi-sheet workbook, the user wants a dedicated
+    # section per sheet (labeled with its sheet number and name) rather than one
+    # consolidated summary — different sheets in a workbook are often unrelated data,
+    # and a single blended summary loses that structure.
+    multi_sheet_docs = [d for d in documents_with_data if len(d.get('sheet_names') or []) > 1]
+
     focus_line = f'\n\nThe user asked the report to focus on: {focus}' if focus else ''
-    prompt = (
-        'Write an executive procurement report grounded strictly in the document data below. '
-        'You decide the structure — choose whatever sections genuinely fit what this data actually '
-        'contains (for example: Executive Summary, Spend Breakdown, Risk Flags, Contract Expiries, '
-        'Vendor Performance, Recommendations — use only the ones the data supports, and add others '
-        'if something else stands out). Do not force content into sections the data doesn\'t support.'
-        f'{focus_line}\n\n'
-        'Return ONLY valid JSON (no markdown code fences, no comments) with keys: report_markdown, '
-        'chart_title, chart_type, chart_data.\n'
-        '"report_markdown" is the full report as a Markdown string (use "## " headers, bullet points, '
-        '**bold** for figures, and tables where useful) — this is the main content, written in your own '
-        'judgment, not a fixed template. Every figure, name, and date in it must trace back to the real '
-        'document data shown below. If the sheet only has generic columns (e.g. "Item"/"Value") with no '
-        'real category, department, or vendor names in the cells, describe the data using its actual column '
-        'and sheet names — do NOT invent plausible-sounding business labels (department names, vendor names, '
-        'satisfaction scores, category names) just to make the report read more polished. A real number '
-        'wrapped in a fabricated label is still fabrication.\n'
-        '"chart_type" is "bar", "pie", or "line" — ONLY include a chart if the data genuinely has a '
-        'quantitative breakdown worth visualizing (e.g. spend by category, vendor count by risk level). '
-        'If nothing in the real data supports a meaningful chart, set chart_type and chart_data to null/empty '
-        '— never invent illustrative or placeholder numbers to fill a chart. "chart_data", when present, is '
-        'an array of 3-8 real objects shaped like {"name": "<label>", "value": <number>}, drawn from actual '
-        'figures in the document data, not estimates.'
-        f"{context_block}"
-    )
+
+    if multi_sheet_docs:
+        sheet_list_lines = []
+        for doc in multi_sheet_docs:
+            names = doc.get('sheet_names') or []
+            sheet_list_lines.append(f"{doc.get('name', 'Unknown')}: " + ', '.join(f'{i+1}. {n}' for i, n in enumerate(names)))
+        sheet_list = '\n'.join(sheet_list_lines)
+
+        prompt = (
+            'Write a per-sheet procurement report grounded strictly in the document data below. This workbook '
+            'has multiple sheets — do NOT write one consolidated summary. Instead, write ONE section for EVERY '
+            'sheet listed below, in the exact order listed, covering ALL of them — do not skip any sheet even '
+            'if its content seems minor.\n\n'
+            f'Sheets to cover, in order:\n{sheet_list}\n\n'
+            'Each section header must be exactly: "## Sheet <number>: <sheet name>" (using the sheet\'s position '
+            'number and its real name from the list above). Within each section, summarize that sheet\'s own '
+            'data only — key figures, structure, notable entries — grounded strictly in that sheet\'s data as '
+            'shown below. If a sheet has little or no meaningfully analyzable content, say so briefly in its '
+            'section (e.g. "No notable figures in this sheet") rather than omitting the section entirely. '
+            'Start with a short 1-2 sentence overview before the per-sheet sections, then end with a brief '
+            '"## Overall Notes" section only if something spans multiple sheets worth flagging.'
+            f'{focus_line}\n\n'
+            'Return ONLY valid JSON (no markdown code fences, no comments) with keys: report_markdown, '
+            'chart_title, chart_type, chart_data.\n'
+            '"report_markdown" must be a SINGLE PLAIN STRING — never an array, never an object, never '
+            'one-object-per-sheet. Concatenate every section (the overview, all per-sheet sections, and the '
+            'optional overall notes) into ONE continuous Markdown string, with each "## " header inside that '
+            'same string, separated by blank lines. Use "## " headers, bullet points, **bold** for figures, '
+            'and tables where useful within that one string. Every figure, name, and date in it must trace '
+            'back to the real document data shown below. If a sheet only has generic columns (e.g. '
+            '"Item"/"Value") with no real category, department, or vendor names in the cells, describe it '
+            'using its actual column names — do NOT invent plausible-sounding business labels (department '
+            'names, vendor names, satisfaction scores) just to make a section read more polished. A real '
+            'number wrapped in a fabricated label is still fabrication.\n'
+            '"chart_type" is "bar", "pie", or "line" — ONLY include a chart if the data genuinely has a '
+            'quantitative breakdown worth visualizing across sheets. If nothing supports a meaningful chart, '
+            'set chart_type and chart_data to null/empty — never invent placeholder numbers. "chart_data", '
+            'when present, is an array of 3-8 real objects shaped like {"name": "<label>", "value": <number>}.'
+            f"{context_block}"
+        )
+        max_tokens = 4000
+    else:
+        prompt = (
+            'Write an executive procurement report grounded strictly in the document data below. '
+            'You decide the structure — choose whatever sections genuinely fit what this data actually '
+            'contains (for example: Executive Summary, Spend Breakdown, Risk Flags, Contract Expiries, '
+            'Vendor Performance, Recommendations — use only the ones the data supports, and add others '
+            'if something else stands out). Do not force content into sections the data doesn\'t support.'
+            f'{focus_line}\n\n'
+            'Return ONLY valid JSON (no markdown code fences, no comments) with keys: report_markdown, '
+            'chart_title, chart_type, chart_data.\n'
+            '"report_markdown" is the full report as a Markdown string (use "## " headers, bullet points, '
+            '**bold** for figures, and tables where useful) — this is the main content, written in your own '
+            'judgment, not a fixed template. Every figure, name, and date in it must trace back to the real '
+            'document data shown below. If the sheet only has generic columns (e.g. "Item"/"Value") with no '
+            'real category, department, or vendor names in the cells, describe the data using its actual column '
+            'and sheet names — do NOT invent plausible-sounding business labels (department names, vendor names, '
+            'satisfaction scores, category names) just to make the report read more polished. A real number '
+            'wrapped in a fabricated label is still fabrication.\n'
+            '"chart_type" is "bar", "pie", or "line" — ONLY include a chart if the data genuinely has a '
+            'quantitative breakdown worth visualizing (e.g. spend by category, vendor count by risk level). '
+            'If nothing in the real data supports a meaningful chart, set chart_type and chart_data to null/empty '
+            '— never invent illustrative or placeholder numbers to fill a chart. "chart_data", when present, is '
+            'an array of 3-8 real objects shaped like {"name": "<label>", "value": <number>}, drawn from actual '
+            'figures in the document data, not estimates.'
+            f"{context_block}"
+        )
+        max_tokens = 2200
 
     response = create_chat_completion(
         [{'role': 'system', 'content': load_system_prompt()}, {'role': 'user', 'content': prompt}],
-        max_tokens=2200,
+        max_tokens=max_tokens,
     )
     text = response.choices[0].message.content
 
@@ -438,9 +497,58 @@ def generate_report(document_context: dict = None, focus: str = None) -> dict:
             'chart_data': [],
         }
 
-    if isinstance(parsed.get('report_markdown'), (dict, list)):
-        parsed['report_markdown'] = json.dumps(parsed['report_markdown'])
+    report_markdown = parsed.get('report_markdown')
+    if isinstance(report_markdown, list):
+        # Weaker models sometimes structure this as one object per sheet (e.g.
+        # {"sheet_number": 1, "section": "Summary", "content": "..."}) despite being
+        # told it must be a single string. Recover the actual text instead of dumping
+        # raw JSON to the user.
+        parts = []
+        for item in report_markdown:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                content = next((item[k] for k in ('content', 'text', 'markdown', 'section_content') if isinstance(item.get(k), str)), None)
+                if content:
+                    header = item.get('section') or item.get('sheet_name')
+                    parts.append(f"## {header}\n{content}" if header and not content.lstrip().startswith('#') else content)
+        parsed['report_markdown'] = '\n\n'.join(parts) if parts else json.dumps(report_markdown)
+    elif isinstance(report_markdown, dict):
+        parsed['report_markdown'] = json.dumps(report_markdown)
     parsed.setdefault('report_markdown', text if isinstance(text, str) else '')
+
+    # Weaker models occasionally double-escape newlines when building the JSON string
+    # (producing the literal two characters "\n" in the value instead of a real
+    # newline), which json.loads() then leaves as literal backslash-n text. Markdown
+    # content should never legitimately contain that literal sequence, so clean it up.
+    if isinstance(parsed.get('report_markdown'), str):
+        parsed['report_markdown'] = parsed['report_markdown'].replace('\\n', '\n')
+
+    # Hard safety net for the per-sheet mode specifically: a weaker model occasionally
+    # ignores the per-sheet instruction entirely and free-associates a generic-sounding
+    # "typical business report" (fake categories, fake vendor names, fake contract
+    # numbers) with zero connection to the actual sheets. If the report doesn't mention
+    # at least half of the real sheet names, that's a strong signal it did exactly
+    # that — refuse to show it rather than risk displaying fabricated content.
+    if multi_sheet_docs:
+        all_sheet_names = [n for doc in multi_sheet_docs for n in (doc.get('sheet_names') or [])]
+        report_text = parsed.get('report_markdown') or ''
+        # Word-boundary match, not plain substring — a sheet literally named "1" would
+        # otherwise "match" trivially inside any generated number like "$125,000".
+        mentioned = sum(
+            1 for n in all_sheet_names
+            if re.search(r'(?<![\w.])' + re.escape(n) + r'(?![\w.])', report_text, re.IGNORECASE)
+        )
+        if all_sheet_names and mentioned < max(1, len(all_sheet_names) // 2):
+            parsed['report_markdown'] = (
+                'The generated report didn\'t stay grounded in this workbook\'s actual sheets — discarded '
+                'rather than shown, since this tool never displays content it can\'t verify against your '
+                'real data. Please try again.'
+            )
+            parsed['chart_title'] = None
+            parsed['chart_type'] = None
+            parsed['chart_data'] = []
+            return parsed
 
     parsed['chart_data'] = _sanitize_chart_data(parsed.get('chart_data'))
     parsed['chart_type'] = parsed.get('chart_type') if parsed.get('chart_type') in ('bar', 'pie', 'line') else None
