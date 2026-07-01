@@ -125,10 +125,36 @@ def _format_result(value: Any) -> str:
             'or switch to **Model A**.'
         )
 
-    # If the code set result to the "cannot determine" sentinel, pass it through cleanly.
-    if isinstance(value, str) and 'cannot determine' in value.lower():
-        return value
+    if isinstance(value, str):
+        if 'cannot determine' in value.lower():
+            return value
+        return value  # clean string answer — return as-is
 
+    # numpy scalar → plain Python number
+    if hasattr(value, 'item') and not isinstance(value, (pd.Series, pd.DataFrame, pd.Index)):
+        value = value.item()
+
+    # pandas Index or numpy array → flat list
+    if isinstance(value, pd.Index):
+        value = value.tolist()
+    elif hasattr(value, 'tolist') and not isinstance(value, (pd.Series, pd.DataFrame)):
+        value = value.tolist()
+
+    # Plain Python list → bulleted list (clean, no repr noise)
+    if isinstance(value, list):
+        if not value:
+            return 'No matching results.'
+        items = value[:50]
+        lines = '\n'.join(f'- {item}' for item in items)
+        suffix = f'\n\n*Showing {len(items)} of {len(value)} items.*' if len(value) > len(items) else ''
+        return lines + suffix
+
+    if isinstance(value, (int, float)):
+        if value != value:  # NaN
+            return 'No result (NaN).'
+        return f'**{value:,.4g}**'
+
+    # pandas Series → convert to two-column DataFrame for table rendering
     if isinstance(value, pd.Series):
         value = value.reset_index()
         value.columns = [str(c) for c in value.columns]
@@ -146,9 +172,7 @@ def _format_result(value: Any) -> str:
         suffix = f'\n\n*Showing {len(rows)} of {len(value)} rows.*' if len(value) > len(rows) else ''
         return f'{header}\n{sep}\n{body}{suffix}'
 
-    if isinstance(value, (int, float)):
-        return f'**{value:,.4g}**'
-
+    # Fallback: anything else stringify cleanly
     return str(value)
 
 
@@ -234,6 +258,9 @@ def model_b_agent(
         '- Always call .dropna(subset=[col]) before aggregating to avoid NaN errors\n'
         '- Convert currency/number columns with pd.to_numeric(df[col], errors="coerce") '
         'if they might contain strings\n'
+        '- For a list of values (e.g. unique names), use result = df["Col"].dropna().unique().tolist() '
+        '— never assign a raw numpy array or pandas Index to result\n'
+        '- For a single number, assign result = float(value) or result = int(value)\n'
         '- If the data cannot answer the question, set result = '
         '"Cannot determine from the available data."\n\n'
         'Return ONLY valid Python code — no markdown fences, no explanation.'
