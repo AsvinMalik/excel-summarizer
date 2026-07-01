@@ -182,6 +182,27 @@ def model_b_agent(
     if refusal:
         return _wrap('deterministic', refusal)
 
+    # Model B is a pandas code-execution sandbox — it answers precise data queries
+    # (totals, rankings, filters, counts). Narrative/summary questions ("summarize sheet
+    # by sheet", "extract clauses", "write a report") can't be answered by pandas code;
+    # attempting to generate code for them always fails. Detect and redirect immediately.
+    _NARRATIVE_RE = re.compile(
+        r'\b(summar|overview|descri|explain|introduc|tell\s+me\s+about|'
+        r'highlight|outline|brief|report\s+on|write\s+a\s+report|build\s+(a\s+)?report|'
+        r'insights?|analys[ie]|key\s+(point|finding|trend|takeaway)|'
+        r'extract\s+clause|generate\s+rfq|what\s+(is|are|does))\b',
+        re.IGNORECASE,
+    )
+    if _NARRATIVE_RE.search(user_query):
+        return _wrap('MODEL_B', (
+            '**Model B is a pandas sandbox** — it answers precise data queries by '
+            'generating and running Python code on your data (e.g. totals, rankings, '
+            'filters, counts).\n\n'
+            'This question asks for a **narrative summary or analysis**, which needs '
+            'language reasoning, not code execution. '
+            'Switch to **Model A** for summaries, reports, and clause extraction.'
+        ))
+
     # Find the active document with a real file path
     documents = (document_context or {}).get('documents') or []
     active_doc = (document_context or {}).get('active_document')

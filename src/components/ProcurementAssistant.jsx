@@ -56,7 +56,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
     messagesEnd.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const handleSendMessage = async (overrideText) => {
+  const handleSendMessage = async (overrideText, forceModelKey) => {
     const userText = (overrideText ?? input).trim();
     if (!userText) return;
     const newMessage = { id: Date.now(), type: 'user', text: userText };
@@ -73,7 +73,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
         documents: documents.map((doc) => ({ doc_id: doc.doc_id, id: doc.id, name: doc.name, type: doc.type, status: doc.status })),
       };
 
-      const response = await sendChat({ sessionId, userQuery: userText, context, modelKey: selectedModel });
+      const response = await sendChat({ sessionId, userQuery: userText, context, modelKey: forceModelKey || selectedModel });
       const assistantText = Array.isArray(response.response)
         ? response.response
             .map((block) => (typeof block === 'string' ? block : block.text || JSON.stringify(block)))
@@ -304,7 +304,10 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
       return;
     }
     const activeDocument = activeDoc ? documents.find((doc) => doc.id === activeDoc) : null;
-    handleSendMessage(action.buildPrompt(activeDocument));
+    // Quick actions are always narrative tasks (summarize, extract, report, RFQ) — they
+    // require language reasoning, not pandas code execution. Force Model A regardless of
+    // what the user has selected so Model B never gets a narrative prompt it can't handle.
+    handleSendMessage(action.buildPrompt(activeDocument), 'model_a');
   };
 
   const QuickActions = () => (
