@@ -460,6 +460,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
   const MODEL_BADGE = {
     MODEL_B:           { label: 'Model B · Sandbox',  color: 'bg-violet-100 text-violet-700' },
     model_b_redirect:  { label: 'Model B → Model A',  color: 'bg-amber-100 text-amber-700' },
+    map_reduce:        { label: 'Model C · Pearl Pro', color: 'bg-emerald-100 text-emerald-700' },
     PHI3_LOCAL:   { label: 'Phi3 · Local',      color: 'bg-emerald-100 text-emerald-700' },
     GROQ:         { label: 'Groq · Llama 3.3',  color: 'bg-purple-100 text-purple-700' },
     CEREBRAS:     { label: 'Cerebras',           color: 'bg-orange-100 text-orange-700' },
@@ -488,11 +489,15 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
           ? 'bg-blue-50 text-blue-900 border border-blue-200'
           : 'bg-gray-100 text-gray-900'
       }`}>
-        {msg.type === 'assistant' && msg.model && MODEL_BADGE[msg.model] && (
-          <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded-full mb-2 ${MODEL_BADGE[msg.model].color}`}>
-            {MODEL_BADGE[msg.model].label}
-          </span>
-        )}
+        {msg.type === 'assistant' && msg.model && (() => {
+          const badgeKey = msg.model.startsWith('map-reduce') ? 'map_reduce' : msg.model;
+          const badge = MODEL_BADGE[badgeKey];
+          return badge ? (
+            <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded-full mb-2 ${badge.color}`}>
+              {badge.label}
+            </span>
+          ) : null;
+        })()}
         {msg.type === 'user' ? (
           <p className="text-sm leading-relaxed">{msg.text}</p>
         ) : (
@@ -610,7 +615,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
                 className="flex items-center gap-1.5 px-3 py-3 rounded-lg border border-gray-300 bg-white hover:border-blue-400 transition text-xs font-semibold text-gray-600 whitespace-nowrap"
                 title="Choose pipeline and API"
               >
-                <span className={`w-2 h-2 rounded-full ${selectedModel === 'model_b' ? 'bg-violet-500' : 'bg-blue-500'}`} />
+                <span className={`w-2 h-2 rounded-full ${selectedModel === 'model_b' ? 'bg-violet-500' : selectedModel === 'model_c' ? 'bg-emerald-500' : 'bg-blue-500'}`} />
                 {MODEL_OPTIONS.find(m => m.value === selectedModel)?.label}
                 <span className="text-gray-400">·</span>
                 {PROVIDER_OPTIONS.find(p => p.value === selectedProvider)?.label}

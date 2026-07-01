@@ -54,7 +54,12 @@ def compute_category_breakdowns(df: pd.DataFrame, max_dimensions: int = 3, max_m
 
     dimensions = []
     for col in text_cols:
-        nunique = df[col].nunique()
+        try:
+            nunique = df[col].nunique()
+        except TypeError:
+            # Mixed types (e.g. datetime + int) can't be compared for uniqueness;
+            # cast to string so nunique works safely.
+            nunique = df[col].astype(str).nunique()
         if 2 <= nunique <= max_groups:
             dimensions.append(col)
         if len(dimensions) >= max_dimensions:
@@ -63,17 +68,23 @@ def compute_category_breakdowns(df: pd.DataFrame, max_dimensions: int = 3, max_m
     breakdowns = []
     for dim in dimensions:
         for measure in numeric_cols[:max_measures]:
-            series = pd.to_numeric(df[measure], errors='coerce')
-            grouped_sum = series.groupby(df[dim]).sum().sort_values(ascending=False)
-            grouped_mean = series.groupby(df[dim]).mean()
-            breakdowns.append({
-                'dimension': dim,
-                'measure': measure,
-                'groups': [
-                    {'group': str(g), 'sum': round(float(grouped_sum[g]), 2), 'mean': round(float(grouped_mean[g]), 2)}
-                    for g in grouped_sum.index
-                ],
-            })
+            try:
+                series = pd.to_numeric(df[measure], errors='coerce')
+                # Cast the dimension to string so groupby handles mixed types
+                # (e.g. a column containing both datetime and int values).
+                dim_series = df[dim].astype(str)
+                grouped_sum = series.groupby(dim_series).sum().sort_values(ascending=False)
+                grouped_mean = series.groupby(dim_series).mean()
+                breakdowns.append({
+                    'dimension': dim,
+                    'measure': measure,
+                    'groups': [
+                        {'group': str(g), 'sum': round(float(grouped_sum[g]), 2), 'mean': round(float(grouped_mean[g]), 2)}
+                        for g in grouped_sum.index
+                    ],
+                })
+            except Exception:
+                continue
     return breakdowns
 
 
@@ -92,9 +103,14 @@ def profile_workbook(all_sheets: dict) -> dict:
     """all_sheets: {sheet_name: DataFrame} as returned by pd.read_excel(sheet_name=None)."""
     profiles = {}
     for name, df in all_sheets.items():
-        profile = profile_sheet(df)
-        profile['breakdowns'] = compute_category_breakdowns(df)
-        profiles[name] = profile
+        try:
+            profile = profile_sheet(df)
+            profile['breakdowns'] = compute_category_breakdowns(df)
+            profiles[name] = profile
+        except Exception:
+            # One malformed sheet must not abort the entire workbook profiling.
+            profiles[name] = {'row_count': len(df), 'columns': [], 'breakdowns': [],
+                              'null_total': 0, 'duplicate_rows': 0}
     return profiles
 
 

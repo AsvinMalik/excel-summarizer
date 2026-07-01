@@ -866,10 +866,15 @@ def _build_full_context(document_context: Optional[dict]) -> Optional[dict]:
 
 def procure_agent(user_query: str, document_context: dict = None, session_state: dict = None, model_key: str = 'model_a', provider_key: str = 'auto') -> dict:
     # MODEL_B: Pandas sandbox — LLM generates & executes code against real data.
-    # Routes to a completely separate pipeline; lazy import avoids circular dependency.
     if model_key == 'model_b':
         from model_b_agent import model_b_agent
         return model_b_agent(user_query, document_context, session_state, provider_key=provider_key)
+
+    # MODEL_C (Pearl Pro): always use the whole-workbook map-reduce pipeline
+    # regardless of query phrasing. The user has explicitly asked for workbook-wide
+    # synthesis — skip the query classifier and the active-sheet scope entirely.
+    if model_key == 'model_c':
+        return _map_reduce_analysis(user_query, document_context, provider_key)
 
     structural_answer = _try_answer_structural_question(user_query, document_context)
     if structural_answer:

@@ -22,4 +22,9 @@ export const MODEL_OPTIONS = [
     label: 'Model B',
     desc: 'Pandas sandbox — AI generates & runs code on your actual data',
   },
+  {
+    value: 'model_c',
+    label: 'Model C · Pearl Pro',
+    desc: 'Whole-workbook map-reduce — synthesises every sheet for every query',
+  },
 ];
