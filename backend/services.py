@@ -574,15 +574,24 @@ def _try_answer_data_query(user_query: str, document_context: dict = None) -> Op
 
 # ── Phase 4: Whole-workbook map-reduce analysis ───────────────────────────────
 
-# Conservative per-chunk budget: fits Phi3's ~4096-token context with system
-# prompt and question overhead.  Each chunk = one or more sheets whose combined
-# content block stays under this limit.
-_CHUNK_CHAR_BUDGET = 6_000
+# Phase 2a: provider-aware chunk budgets for the map-reduce pipeline.
+# Phi3 has a 4096-token window; Groq/Cerebras have 128k-131k token windows.
+# Larger chunks → fewer LLM calls → faster and cheaper map-reduce.
+_PROVIDER_CHUNK_BUDGETS: dict = {
+    'phi3':        6_000,   # ~1 500 tokens — fits Phi3 with overhead
+    'groq':       40_000,   # ~10 000 tokens — large chunks, few calls
+    'cerebras':   40_000,   # same as Groq
+    'openrouter': 12_000,   # conservative for free-tier models
+    'gemini':     60_000,   # Gemini 1.5 Pro — very generous
+    'openai':     16_000,   # GPT-4o-mini conservative
+    'auto':       12_000,   # default for auto chain (safe for all providers)
+}
+_CHUNK_CHAR_BUDGET = _PROVIDER_CHUNK_BUDGETS['auto']  # backward-compat default
 
 # Cap per-chunk summary length so the reduce step's input stays manageable
 # even on a 30-sheet workbook.
-_MAP_MAX_TOKENS = 500
-_REDUCE_MAX_TOKENS = 1_800
+_MAP_MAX_TOKENS = 600
+_REDUCE_MAX_TOKENS = 2_000
 
 
 def _build_sheet_content_block(sheet_name: str, sheet_profile: dict, sheet_stats: dict) -> str:
@@ -611,8 +620,8 @@ def _build_sheet_content_block(sheet_name: str, sheet_profile: dict, sheet_stats
     return '\n'.join(parts)
 
 
-def _chunk_sheets(sheet_blocks: dict) -> list:
-    """Group sheets into chunks whose combined content fits _CHUNK_CHAR_BUDGET.
+def _chunk_sheets(sheet_blocks: dict, budget: int = _CHUNK_CHAR_BUDGET) -> list:
+    """Group sheets into chunks whose combined content fits the given budget.
 
     Chunks by actual content size (not sheet count) so that a 392-row × 78-col
     sheet and a 2-row × 5-col sheet don't end up in the same group just because
@@ -625,7 +634,7 @@ def _chunk_sheets(sheet_blocks: dict) -> list:
 
     for sheet_name, block in sheet_blocks.items():
         block_size = len(block)
-        if current and current_size + block_size > _CHUNK_CHAR_BUDGET:
+        if current and current_size + block_size > budget:
             chunks.append(current)
             current = [sheet_name]
             current_size = block_size
@@ -700,7 +709,8 @@ def _map_reduce_analysis(
         )
 
     all_sheet_names = list(sheet_blocks.keys())
-    chunks = _chunk_sheets(sheet_blocks)
+    chunk_budget = _PROVIDER_CHUNK_BUDGETS.get(provider_key, _CHUNK_CHAR_BUDGET)
+    chunks = _chunk_sheets(sheet_blocks, budget=chunk_budget)
 
     # ── Cross-sheet relationship context (for reduce step) ───────────────────
     relationships_text = format_relationships_block(unified_schema) or ''

@@ -360,11 +360,19 @@ TASK_STORE = {}
 
 # Preview budget raised from 24,000 → 72,000 chars.
 # Groq (primary provider, llama-3.3-70b) has a 131,072-token context window;
-# 72,000 chars ≈ 18,000 tokens, leaving ample room for system prompt, profile
-# blocks, stats, and conversation history.  Full Phase 2a (per-provider caps
-# resolved dynamically against the active provider's real window) is still
-# pending — this is an interim improvement that covers most real workbooks.
-DATA_PREVIEW_CHAR_LIMIT = 72_000
+# Phase 2a: provider-aware preview budget (chars ≈ tokens × 4).
+# Resolved at request time against the active provider's real context window,
+# less a conservative reserve for system prompt + schema + stats blocks.
+_PROVIDER_PREVIEW_LIMITS: dict = {
+    'phi3':       12_000,   # Phi3/Ollama: 4 096-token window — keep it tight
+    'groq':      100_000,   # Groq llama-3.3-70b: 131 072-token window
+    'cerebras':  100_000,   # Cerebras llama-3.1-70b: 128 000-token window
+    'openrouter': 48_000,   # OpenRouter free tier: variable, conservative 12k tok
+    'gemini':    200_000,   # Gemini 1.5 Pro: 1 M token window — generous cap
+    'openai':     48_000,   # OpenAI GPT-4o-mini free tier: conservative
+    'auto':       72_000,   # Auto chain: budget for the smallest likely provider
+}
+DATA_PREVIEW_CHAR_LIMIT = _PROVIDER_PREVIEW_LIMITS['auto']  # backward-compat default
 
 # ── Snapshot persistence ──────────────────────────────────────────────────────
 # Processed document data (profile, schema, stats, etc.) is saved as a JSON
@@ -430,13 +438,14 @@ def _extract_sheet_section(parsed_csv: str, sheet_name: str) -> str:
     return m.group(1).strip() if m else ''
 
 
-def _enrich_doc(doc: dict) -> dict:
+def _enrich_doc(doc: dict, provider_key: str = 'auto') -> dict:
     if not doc or not doc.get('doc_id'):
         return doc
     stored = DOCUMENT_STORE.get(doc['doc_id'])
     if not stored or not stored.get('parsed_csv'):
         return doc
 
+    char_limit = _PROVIDER_PREVIEW_LIMITS.get(provider_key, DATA_PREVIEW_CHAR_LIMIT)
     active_sheet = doc.get('active_sheet')
 
     preview = stored['parsed_csv']
@@ -471,13 +480,13 @@ def _enrich_doc(doc: dict) -> dict:
         if sheet_col_list:
             columns = [c['name'] for c in sheet_col_list if isinstance(c, dict) and c.get('name')]
 
-    truncated = len(preview) > DATA_PREVIEW_CHAR_LIMIT
+    truncated = len(preview) > char_limit
     return {
         **doc,
         'row_count': stored.get('row_count'),
         'columns': columns,
         'sheet_names': stored.get('sheet_names'),  # always full list (tab bar needs it)
-        'data_preview': preview[:DATA_PREVIEW_CHAR_LIMIT],
+        'data_preview': preview[:char_limit],
         'data_preview_truncated': truncated,
         'profile': profile,
         'unified_schema': unified_schema,
@@ -498,13 +507,13 @@ def _enrich_doc(doc: dict) -> dict:
     }
 
 
-def enrich_document_context(context: Optional[dict]) -> Optional[dict]:
+def enrich_document_context(context: Optional[dict], provider_key: str = 'auto') -> Optional[dict]:
     if not context:
         return context
     return {
         **context,
-        'active_document': _enrich_doc(context.get('active_document')),
-        'documents': [_enrich_doc(doc) for doc in context.get('documents') or []],
+        'active_document': _enrich_doc(context.get('active_document'), provider_key),
+        'documents': [_enrich_doc(doc, provider_key) for doc in context.get('documents') or []],
     }
 
 @app.post("/api/upload")
@@ -529,7 +538,7 @@ async def upload_document(file: UploadFile = File(...), company: str = None, use
 
 @app.post("/api/chat")
 async def chat(request: ConversationMessage):
-    enriched_context = enrich_document_context(request.context)
+    enriched_context = enrich_document_context(request.context, request.provider_key or 'auto')
     t0 = time()
     response = procure_agent(
         user_query=request.user_query,
