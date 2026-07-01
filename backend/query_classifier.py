@@ -61,6 +61,8 @@ _MULTI_HOP_RE = re.compile(
     r'|cross.?sheet'
     r'|join\s+(?:sheet|tab)s?'
     r'|multiple\s+sheets?'
+    r'|vs\.?\s+(?:sheet|tab)'
+    r'|compared?\s+(?:to|with)\s+(?:sheet|tab)'
     r')\b',
     re.IGNORECASE,
 )

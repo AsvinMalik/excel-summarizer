@@ -88,6 +88,9 @@ def _promote_row_as_headers(df: pd.DataFrame, data_row_idx: int) -> pd.DataFrame
     seen: dict = {}
     for orig_col, sub_val in zip(df.columns, candidate):
         parent = str(orig_col) if not str(orig_col).startswith('Unnamed') else ''
+        # Garbled single-char symbols and formula strings are not real parent labels
+        if len(parent) <= 1 or '`' in parent or parent.startswith('='):
+            parent = ''
         sub = str(sub_val).strip() if pd.notna(sub_val) and str(sub_val) != 'nan' else ''
         if parent and sub and parent != sub:
             name = f'{parent} - {sub}'
@@ -111,8 +114,13 @@ def _promote_row_as_headers(df: pd.DataFrame, data_row_idx: int) -> pd.DataFrame
 def _clean_sheet_headers(df: pd.DataFrame) -> pd.DataFrame:
     """Normalise Excel headers that pandas reads poorly.
 
-    Three classes of real-file corruption handled (all confirmed against the
+    Four classes of real-file corruption handled (all confirmed against the
     reference MIS workbook 'MIS Automation PGIL.xlsx'):
+
+    0. Numeric values in df.columns — pandas read an FX-rate or data row as
+       the Excel header row (Sheet 18 pattern: 'Fx Rate', 73.5, 75.81, ...).
+       Fix: when >30% of column labels are actual float/int, scan the first
+       data rows for the real header and promote it.
 
     1. Title/blank rows above the real header — a report-title merged cell
        (e.g. 'CONSOLIDATED REPORT 2024' across 70 columns) or a blank
@@ -138,6 +146,40 @@ def _clean_sheet_headers(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     cols = list(df.columns)
+
+    # ── Case 0: df.columns itself contains many numeric values ───────────────
+    # Happens when pandas reads a data row (FX rates, check row, etc.) as the
+    # Excel header because that row happens to be row 1 in the sheet.
+    # Sheet 18 exhibits this: columns = ['Fx Rate', 73.5, 75.81, 82.22, ...].
+    # We build column names directly from the found header row so no numeric
+    # parent labels bleed in (bypasses _promote_row_as_headers intentionally).
+    # Ratio over non-Unnamed columns only: trailing Unnamed cols from merged
+    # cells inflate the denominator and dilute the signal on narrow datasets.
+    non_unnamed_cols = [c for c in cols if not str(c).startswith('Unnamed:')]
+    numeric_col_count = sum(
+        1 for c in non_unnamed_cols if isinstance(c, (int, float)) and not isinstance(c, bool)
+    )
+    if non_unnamed_cols and numeric_col_count / len(non_unnamed_cols) > 0.30:
+        for scan_idx in range(min(8, len(df))):
+            row_list = list(df.iloc[scan_idx])
+            if _is_header_candidate(row_list):
+                new_cols: list = []
+                seen_nc: dict = {}
+                for val in row_list:
+                    s = str(val).strip() if pd.notna(val) and str(val).strip() not in ('', 'nan') else ''
+                    name = s if s else f'Col_{len(new_cols)}'
+                    if name in seen_nc:
+                        seen_nc[name] += 1
+                        name = f'{name}_{seen_nc[name]}'
+                    else:
+                        seen_nc[name] = 0
+                    new_cols.append(name)
+                out = df.iloc[scan_idx + 1:].reset_index(drop=True)
+                out.columns = new_cols
+                return out
+        # No header candidate found — return df unchanged
+        return df
+
     unnamed_count = sum(1 for c in cols if str(c).startswith('Unnamed:'))
 
     # Only attempt header repair when pandas assigned many Unnamed columns —
@@ -145,14 +187,20 @@ def _clean_sheet_headers(df: pd.DataFrame) -> pd.DataFrame:
     if unnamed_count / max(len(cols), 1) <= 0.25:
         return df
 
-    # ── Phase 1: scan the first data rows for the real header ────────────────
-    # Skip confirmed title/blank rows, stop as soon as we find a header candidate
-    # or a data row (fail closed — leave as-is rather than corrupt the frame).
-    MAX_SCAN = 5  # never look more than 5 rows deep (avoids eating real data)
+    # ── Case 1: scan the first data rows for the real header ─────────────────
+    # Skip confirmed title/blank rows AND sparse junk rows (e.g. a single
+    # "99" or "(US$ in '000s)" that sits between the title and the header).
+    # Stop as soon as we find a genuine header candidate or hit a dense data
+    # row (fail closed — leave as-is rather than eat real data rows).
+    MAX_SCAN = 6
     rows_to_skip = 0
 
     for scan_idx in range(min(MAX_SCAN, len(df))):
         row_list = list(df.iloc[scan_idx])
+        non_null_count = sum(
+            1 for v in row_list
+            if pd.notna(v) and str(v).strip() not in ('', 'nan')
+        )
 
         if _is_title_row(row_list, len(cols)):
             # Confirmed title/blank — skip it and keep scanning
@@ -161,17 +209,17 @@ def _clean_sheet_headers(df: pd.DataFrame) -> pd.DataFrame:
 
         if _is_header_candidate(row_list):
             # This row looks like real column headers — promote it
-            if scan_idx > 0 or rows_to_skip > 0:
-                df = df.iloc[rows_to_skip:].reset_index(drop=True)
-                # Re-index scan_idx relative to the trimmed frame
-                promote_at = scan_idx - rows_to_skip
-                return _promote_row_as_headers(df, promote_at)
-            else:
-                # scan_idx == 0: first data row IS the real header (standard two-row case)
-                return _promote_row_as_headers(df, 0)
+            df = df.iloc[rows_to_skip:].reset_index(drop=True)
+            promote_at = scan_idx - rows_to_skip
+            return _promote_row_as_headers(df, promote_at)
 
-        # Row looks like data (numeric, long strings, non-header) — stop scanning.
-        # We've gone as far as we safely can without eating real data rows.
+        # Sparse row (e.g. a units note "99 / (US$ in '000s)" between the
+        # title and the real header) — skip it rather than stopping the scan.
+        if non_null_count < max(3, len(cols) * 0.30):
+            rows_to_skip = scan_idx + 1
+            continue
+
+        # Dense non-header row: we've hit actual data; stop scanning.
         break
 
     # ── Phase 2: fall through — the current df.columns are the best we have.
@@ -310,7 +358,13 @@ DOCUMENT_STORE = {}
 SESSION_STORE = {}
 TASK_STORE = {}
 
-DATA_PREVIEW_CHAR_LIMIT = 24000
+# Preview budget raised from 24,000 → 72,000 chars.
+# Groq (primary provider, llama-3.3-70b) has a 131,072-token context window;
+# 72,000 chars ≈ 18,000 tokens, leaving ample room for system prompt, profile
+# blocks, stats, and conversation history.  Full Phase 2a (per-provider caps
+# resolved dynamically against the active provider's real window) is still
+# pending — this is an interim improvement that covers most real workbooks.
+DATA_PREVIEW_CHAR_LIMIT = 72_000
 
 # ── Snapshot persistence ──────────────────────────────────────────────────────
 # Processed document data (profile, schema, stats, etc.) is saved as a JSON
