@@ -18,6 +18,8 @@ from ai_providers.model_presets import (
     cerebras_provider as _cerebras,
     openrouter_provider as _openrouter,
     demo_provider as _demo,
+    gemini_provider as _gemini,
+    openai_provider as _openai,
 )
 
 os.makedirs(os.path.join(os.path.dirname(__file__), 'logs'), exist_ok=True)
@@ -75,11 +77,11 @@ def create_chat_completion(
     user — NO silent fallback to a different model. The user explicitly chose this model
     and must know when it's unavailable so they can switch.
     """
-    # 'model_a' and 'model_b' are pipeline-level keys handled in procure_agent before
-    # this function is ever reached; treat them as 'auto' here so internal LLM calls
-    # made by model_b_agent (or any code path that passes model_a/model_b through)
-    # still use the best-available chain rather than failing on an unknown preset.
-    if model_key and model_key not in ('auto', 'model_a', 'model_b', None):
+    # 'model_a', 'model_b', 'model_c' are pipeline-level keys handled in procure_agent
+    # before this function is ever reached; treat them as 'auto' here so internal LLM calls
+    # (query spec generation, grounding retries, map-reduce map step) still use the
+    # best-available chain rather than failing on an unknown preset.
+    if model_key and model_key not in ('auto', 'model_a', 'model_b', 'model_c', None):
         return _call_pinned(messages, max_tokens, model_key)
     return _call_chain(messages, max_tokens)
 
@@ -127,10 +129,33 @@ def _call_pinned(messages, max_tokens, model_key) -> MockResponse:
 
 
 def _call_chain(messages, max_tokens) -> MockResponse:
-    """Run the full provider chain; last resort is Demo mode."""
+    """Run the full provider chain; last resort is Demo mode.
+
+    Chain order (Phase 5b): frontier tier (Gemini/OpenAI, if configured) →
+    fast cloud tier (Cerebras → Groq → Phi3) → OpenRouter extra chance → Demo.
+    Frontier providers are tried first when configured — they have the largest
+    context windows and highest reasoning quality.
+    """
     last_error = None
 
-    for level, provider in enumerate(_CHAIN):
+    # Phase 5b: frontier tier first when configured
+    for frontier in (_gemini, _openai):
+        if not frontier.is_configured:
+            continue
+        start = time.monotonic()
+        try:
+            text = frontier.complete(messages, max_tokens)
+            if not text:
+                raise RuntimeError('empty response')
+            elapsed = time.monotonic() - start
+            logger.info('provider=%s level=0 status=success elapsed=%.2fs (frontier)', frontier.name, elapsed)
+            return MockResponse(text, frontier.name)
+        except Exception as e:
+            elapsed = time.monotonic() - start
+            last_error = e
+            logger.warning('provider=%s level=0 status=failed elapsed=%.2fs error=%s (frontier)', frontier.name, elapsed, e)
+
+    for level, provider in enumerate(_CHAIN, start=1):
         if not provider.is_configured:
             logger.info('provider=%s level=%d status=skipped reason=not_configured', provider.name, level)
             continue
@@ -153,13 +178,13 @@ def _call_chain(messages, max_tokens) -> MockResponse:
         try:
             text = _openrouter.complete(messages, max_tokens)
             elapsed = time.monotonic() - start
-            logger.info('provider=OPENROUTER level=3 status=success elapsed=%.2fs', elapsed)
+            logger.info('provider=OPENROUTER level=5 status=success elapsed=%.2fs', elapsed)
             return MockResponse(text, _openrouter.name)
         except Exception as e:
             elapsed = time.monotonic() - start
             last_error = e
-            logger.warning('provider=OPENROUTER level=3 status=failed elapsed=%.2fs error=%s', elapsed, e)
+            logger.warning('provider=OPENROUTER level=5 status=failed elapsed=%.2fs error=%s', elapsed, e)
 
-    logger.error('provider=DEMO level=4 status=fallback last_error=%s', last_error)
+    logger.error('provider=DEMO level=6 status=fallback last_error=%s', last_error)
     text = _demo.complete(messages, max_tokens, error=str(last_error))
     return MockResponse(text, 'DEMO')
