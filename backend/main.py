@@ -42,8 +42,12 @@ from sheet_orchestrator import detect_relationships, classify_sheet_roles, build
 from schema_mapper import build_schema_context
 from data_validator import validate_workbook
 from statistical_analyzer import analyze_workbook
+from audit_logger import log_event, get_events, get_document_lineage, load_from_file
 
 app = FastAPI(title="Procure.ai Backend")
+
+# Reload persisted audit events into memory so history survives backend restarts
+load_from_file()
 
 _default_origins = ["http://localhost:4173", "http://localhost:3000"]
 _extra_origins = [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()]
@@ -184,12 +188,29 @@ async def upload_document(file: UploadFile = File(...), company: str = None, use
 
 @app.post("/api/chat")
 async def chat(request: ConversationMessage):
+    enriched_context = enrich_document_context(request.context)
+    t0 = time()
     response = procure_agent(
         user_query=request.user_query,
-        document_context=enrich_document_context(request.context),
+        document_context=enriched_context,
         session_state=load_session(request.session_id),
     )
+    elapsed_ms = round((time() - t0) * 1000)
     save_conversation(request.session_id, request.user_query, response)
+
+    # Audit the query
+    active_doc = (enriched_context or {}).get('active_document') or {}
+    log_event(
+        'chat_query',
+        user_id=(request.context or {}).get('user_id'),
+        session_id=request.session_id,
+        doc_id=active_doc.get('doc_id'),
+        doc_name=active_doc.get('name'),
+        query=request.user_query,
+        answer_source=response.get('model', 'llm'),
+        processing_time_ms=elapsed_ms,
+    )
+
     return JSONResponse({
         "session_id": request.session_id,
         "response": response["content"],
@@ -311,8 +332,40 @@ async def auto_fill_rfq(request: RFQAutoFillRequest):
 
 @app.post("/api/report")
 async def create_report(request: ReportRequest):
-    result = generate_report(enrich_document_context(request.context), focus=request.focus)
+    enriched_context = enrich_document_context(request.context)
+    t0 = time()
+    result = generate_report(enriched_context, focus=request.focus)
+    elapsed_ms = round((time() - t0) * 1000)
+
+    active_doc = (enriched_context or {}).get('active_document') or {}
+    log_event(
+        'report_generated',
+        user_id=(request.context or {}).get('user_id'),
+        session_id=getattr(request, 'session_id', None),
+        doc_id=active_doc.get('doc_id'),
+        doc_name=active_doc.get('name'),
+        query=request.focus,
+        answer_source='report',
+        processing_time_ms=elapsed_ms,
+    )
     return JSONResponse(result)
+
+
+@app.get("/api/audit")
+async def get_audit_events(
+    user_id: str = None,
+    doc_id: str = None,
+    event_type: str = None,
+    limit: int = 100,
+):
+    events = get_events(user_id=user_id, doc_id=doc_id, event_type=event_type, limit=limit)
+    return JSONResponse({"events": events, "count": len(events)})
+
+
+@app.get("/api/audit/lineage/{doc_id}")
+async def get_doc_lineage(doc_id: str):
+    lineage = get_document_lineage(doc_id)
+    return JSONResponse(lineage)
 
 @app.post("/api/insights/pdf")
 async def download_insights_pdf(request: InsightsRequest):
@@ -424,11 +477,30 @@ def queue_document_processing(doc_id: str, file_path: str, file_type: str, compa
 
             # Data quality validation and statistical analysis — both computed
             # once at upload and injected into LLM context on every request.
-            DOCUMENT_STORE[doc_id]["validation"] = validate_workbook(all_sheets, profile)
+            validation = validate_workbook(all_sheets, profile)
+            DOCUMENT_STORE[doc_id]["validation"] = validation
             DOCUMENT_STORE[doc_id]["statistics"] = analyze_workbook(all_sheets, profile)
 
             DOCUMENT_STORE[doc_id]["status"] = "ready"
             TASK_STORE[task_id]["status"] = "completed"
+
+            # Audit: record the upload and any data quality findings
+            sheet_issue_count = sum(
+                v.get('issue_count', 0) for v in validation.values()
+            )
+            log_event(
+                'document_upload',
+                user_id=user_id,
+                doc_id=doc_id,
+                doc_name=DOCUMENT_STORE[doc_id].get('filename'),
+                result_row_count=total_rows,
+                quality_score=min(
+                    (v.get('quality_score', 100) for v in validation.values()),
+                    default=100,
+                ),
+                anomaly_count=sheet_issue_count,
+                extra={'sheet_count': len(sheet_names), 'sheet_names': sheet_names},
+            )
     except Exception as e:
         print(f"Error processing Excel: {e}")
         DOCUMENT_STORE[doc_id]["status"] = "error"

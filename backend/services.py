@@ -14,6 +14,12 @@ from sheet_orchestrator import format_relationships_block
 from schema_mapper import format_schema_context_block
 from data_validator import format_validation_block
 from statistical_analyzer import format_statistics_block
+from viz_recommender import (
+    recommend_for_query_result,
+    recommend_for_workbook,
+    format_viz_hint,
+    format_viz_context_block,
+)
 
 BASE_PROMPT_PATH = os.path.join(os.path.dirname(__file__), '..', 'agent_system_prompt.txt')
 
@@ -85,6 +91,14 @@ def build_document_context_block(document_context: dict = None) -> str:
         statistics_text = format_statistics_block(doc.get('statistics'))
         if statistics_text:
             context_block += "  " + statistics_text.replace("\n", "\n  ") + "\n"
+
+        # Viz recommendations from workbook structure (profile-only, no DataFrame needed)
+        profile = doc.get('profile') or {}
+        if profile:
+            viz_suggestions = recommend_for_workbook(None, profile)
+            viz_block = format_viz_context_block(viz_suggestions)
+            if viz_block:
+                context_block += "  " + viz_block.replace("\n", "\n  ") + "\n"
 
     return context_block
 
@@ -412,6 +426,11 @@ def _format_query_result(spec: dict, result: dict) -> str:
             lines.append(f'| {row.get(group_col)} | {val_text} |')
         lines.append('')
         lines.append(f'*{result["matched_row_count"]} matching row(s) in Sheet "{sheet}", computed directly from the full dataset.*')
+        viz_rec = recommend_for_query_result('grouped', group_col, value_col, len(rows))
+        viz_hint = format_viz_hint(viz_rec)
+        if viz_hint:
+            lines.append('')
+            lines.append(viz_hint)
         return '\n'.join(lines)
 
     rows = result['rows']
