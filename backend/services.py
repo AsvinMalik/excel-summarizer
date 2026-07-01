@@ -10,6 +10,8 @@ from ai_orchestrator import create_chat_completion
 from data_profiler import format_profile_block, format_breakdowns_block
 from query_engine import load_all_sheets, execute_query_spec
 from grounding_verifier import collect_known_numeric_values, find_unverifiable_numbers
+from sheet_orchestrator import format_relationships_block
+from schema_mapper import format_schema_context_block
 
 BASE_PROMPT_PATH = os.path.join(os.path.dirname(__file__), '..', 'agent_system_prompt.txt')
 
@@ -65,6 +67,19 @@ def build_document_context_block(document_context: dict = None) -> str:
                     "deriving it yourself from individual rows:\n"
                     + "\n".join(all_breakdowns_text) + "\n"
                 )
+
+        schema_context_text = format_schema_context_block(doc.get('schema_context'))
+        if schema_context_text:
+            context_block += (
+                "  " + schema_context_text.replace("\n", "\n  ") + "\n"
+            )
+
+        relationships_text = format_relationships_block(doc.get('unified_schema'))
+        if relationships_text:
+            context_block += (
+                "  " + relationships_text.replace("\n", "\n  ") + "\n"
+            )
+
     return context_block
 
 
@@ -364,7 +379,8 @@ def _try_build_spec_from_regex_only(user_query: str, sheet_column_map: dict, num
 
 
 def _format_query_result(spec: dict, result: dict) -> str:
-    sheet = spec.get('sheet', 'Unknown')
+    join_sheet = (spec.get('join') or {}).get('with_sheet')
+    sheet = f'{spec.get("sheet", "Unknown")} + {join_sheet}' if join_sheet else spec.get('sheet', 'Unknown')
 
     if result['type'] == 'scalar':
         op_label = {'sum': 'Total', 'mean': 'Average', 'count': 'Count', 'min': 'Minimum', 'max': 'Maximum', 'median': 'Median'}.get(result['operation'], result['operation'].title())
@@ -429,37 +445,55 @@ def _try_answer_data_query(user_query: str, document_context: dict = None) -> Op
     if not sheet_column_map:
         return None
 
+    # Include cross-sheet relationships in the spec prompt when they exist — the LLM
+    # can then generate a join spec instead of marking the question as unanswerable.
+    unified_schema = doc.get('unified_schema') or {}
+    relationships = unified_schema.get('relationships') or []
+    relationships_hint = ''
+    if relationships:
+        rel_lines = ['Detected relationships between sheets (can be used for cross-sheet joins):']
+        for r in relationships:
+            rel_lines.append(
+                f'  {r["from_sheet"]}.{r["from_col"]} → {r["to_sheet"]}.{r["to_col"]} '
+                f'({r["type"]}, {int(r["confidence"] * 100)}% confidence)'
+            )
+        relationships_hint = '\n' + '\n'.join(rel_lines) + '\n'
+
     spec_prompt = (
         'Translate this data question into a structured query spec to be executed exactly with pandas. '
         'Do NOT attempt to answer the question yourself — only describe how to compute it.\n\n'
         f'User question: "{user_query}"\n\n'
         'Available sheets and their REAL column names (use these exact names, case-sensitive):\n'
-        f'{json.dumps(sheet_column_map, indent=2)}\n\n'
+        f'{json.dumps(sheet_column_map, indent=2)}\n'
+        f'{relationships_hint}\n'
         'Return ONLY valid JSON (no markdown fences, no comments) with this exact shape:\n'
-        '{"answerable": true|false, "sheet": "<exact sheet name>", "column": "<exact numeric column name or null>", '
+        '{"answerable": true|false, "sheet": "<primary sheet name>", '
+        '"join": {"with_sheet": "<second sheet>", "on": [{"left": "<col in primary sheet>", "right": "<col in second sheet>"}]} or null, '
+        '"column": "<exact numeric column name or null>", '
         '"operation": "sum"|"mean"|"count"|"min"|"max"|"median"|null, "group_by": "<exact column name or null>", '
         '"filters": [{"column": "<exact column name>", "op": ">"|">="|"<"|"<="|"=="|"!=", "value": <number or string>}], '
         '"sort": "asc"|"desc"|null, "limit": <int or null>}\n\n'
-        'Four worked examples (column names below are illustrative — always substitute the REAL column names from '
-        'the sheet list above, never these literal example names):\n'
-        '1. "What is the total Spend?" -> single number, no breakdown, no row list needed:\n'
-        '   {"answerable": true, "sheet": "Sheet1", "column": "Spend", "operation": "sum", "group_by": null, '
+        'Five worked examples (column names below are illustrative — always substitute the REAL column names):\n'
+        '1. "What is the total Spend?" -> single number:\n'
+        '   {"answerable": true, "sheet": "Sheet1", "join": null, "column": "Spend", "operation": "sum", "group_by": null, '
         '"filters": [], "sort": null, "limit": null}\n'
-        '2. "Show total spend grouped by Region" -> one aggregated number PER region, so group_by is set:\n'
-        '   {"answerable": true, "sheet": "Sheet1", "column": "Spend", "operation": "sum", "group_by": "Region", '
+        '2. "Show total spend grouped by Region" -> one aggregated number PER region:\n'
+        '   {"answerable": true, "sheet": "Sheet1", "join": null, "column": "Spend", "operation": "sum", "group_by": "Region", '
         '"filters": [], "sort": null, "limit": null}\n'
-        '3. "Top 3 vendors by spend" -> this ranks individual ROWS, it is NOT an aggregation — leave operation and '
-        'group_by null, and use sort+limit instead. Never put the ranking criterion in "filters":\n'
-        '   {"answerable": true, "sheet": "Sheet1", "column": "Spend", "operation": null, "group_by": null, '
+        '3. "Top 3 vendors by spend" -> ranks individual rows, NOT an aggregation:\n'
+        '   {"answerable": true, "sheet": "Sheet1", "join": null, "column": "Spend", "operation": null, "group_by": null, '
         '"filters": [], "sort": "desc", "limit": 3}\n'
-        '4. "How many vendors have spend over 1,000,000?" -> a count of matching rows; "column" stays null since '
-        'no specific column is being aggregated, only counted:\n'
-        '   {"answerable": true, "sheet": "Sheet1", "column": null, "operation": "count", "group_by": null, '
-        '"filters": [{"column": "Spend", "op": ">", "value": 1000000}], "sort": null, "limit": null}\n\n'
-        'Set "answerable" to false (with other fields null/empty) if this question needs joining multiple sheets, '
-        'reading free-text/narrative content, or anything beyond a single-sheet aggregation/filter/group-by/ranking. '
-        'Never invent a sheet or column name that is not in the list above — if there is no confident match, set '
-        '"answerable" to false instead of guessing.'
+        '4. "How many vendors have spend over 1,000,000?" -> count of matching rows:\n'
+        '   {"answerable": true, "sheet": "Sheet1", "join": null, "column": null, "operation": "count", "group_by": null, '
+        '"filters": [{"column": "Spend", "op": ">", "value": 1000000}], "sort": null, "limit": null}\n'
+        '5. "Total invoice amount by vendor name" where invoices link to vendors via Vendor ID -> cross-sheet join:\n'
+        '   {"answerable": true, "sheet": "Invoices", "join": {"with_sheet": "Vendors", "on": [{"left": "Vendor ID", "right": "Vendor ID"}]}, '
+        '"column": "Invoice Amount", "operation": "sum", "group_by": "Vendor Name", '
+        '"filters": [], "sort": null, "limit": null}\n\n'
+        'Set "answerable" to false only if the question requires reading free-text/narrative content '
+        'or references columns not in the sheet list above. For cross-sheet questions, use the "join" field '
+        'with the detected relationships above rather than setting answerable=false. '
+        'Never invent a sheet or column name that is not in the list above.'
     )
 
     try:
@@ -479,8 +513,22 @@ def _try_answer_data_query(user_query: str, document_context: dict = None) -> Op
         if not spec:
             return None
 
-    sheet_columns = sheet_column_map.get(spec.get('sheet'), [])
-    numeric_columns = numeric_sheet_column_map.get(spec.get('sheet'), [])
+    sheet_columns = list(sheet_column_map.get(spec.get('sheet'), []))
+    numeric_columns = list(numeric_sheet_column_map.get(spec.get('sheet'), []))
+
+    # When a join is specified, the merged DataFrame will include columns from both
+    # sheets — extend the column lists so deterministic overrides can correctly
+    # resolve "group_by" and "column" references from the joined sheet too.
+    join_spec = spec.get('join') or {}
+    joined_sheet = join_spec.get('with_sheet')
+    if joined_sheet:
+        for col in sheet_column_map.get(joined_sheet, []):
+            if col not in sheet_columns:
+                sheet_columns.append(col)
+        for col in numeric_sheet_column_map.get(joined_sheet, []):
+            if col not in numeric_columns:
+                numeric_columns.append(col)
+
     spec = _apply_deterministic_overrides(user_query, spec, sheet_columns, numeric_columns)
 
     try:

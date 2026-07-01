@@ -59,11 +59,60 @@ def _apply_filter(df: pd.DataFrame, column: str, op: str, raw_value) -> pd.DataF
     return df[mask.fillna(False)]
 
 
+def _apply_join(df: pd.DataFrame, all_sheets: dict, join_spec: dict) -> pd.DataFrame:
+    """Merge a second sheet into df using the relationship specified in join_spec.
+
+    join_spec shape:
+      {"with_sheet": "Vendors", "on": [{"left": "Vendor ID", "right": "Vendor ID"}]}
+
+    To avoid column-name collisions, only non-overlapping columns are brought
+    over from the right sheet (except the join key itself, which is needed for
+    the merge and then deduped). This means every column in the resulting df
+    keeps its original name with no suffix mangling, so the rest of the spec
+    (group_by, column, filters) can reference columns from either sheet by
+    their original name.
+    """
+    right_sheet = join_spec.get('with_sheet')
+    if right_sheet not in all_sheets:
+        raise QueryError(f'Join sheet "{right_sheet}" not found')
+
+    on_pairs = join_spec.get('on') or []
+    if not on_pairs:
+        raise QueryError('join spec is missing "on" column pairs')
+
+    left_col = on_pairs[0]['left']
+    right_col = on_pairs[0]['right']
+
+    right_df = all_sheets[right_sheet]
+    left_col_set = set(df.columns)
+
+    # Only bring over columns from the right sheet that aren't already in the left,
+    # plus the right join key itself (needed for the merge). Dropping overlapping
+    # columns prevents pandas from adding _x/_y suffixes that would break column refs.
+    right_keep = [right_col] + [c for c in right_df.columns if c not in left_col_set and c != right_col]
+    right_df = right_df[[c for c in right_keep if c in right_df.columns]]
+
+    if left_col == right_col:
+        merged = df.merge(right_df, on=left_col, how='left')
+    else:
+        merged = df.merge(right_df, left_on=left_col, right_on=right_col, how='left')
+        # Drop the right-side join key — it duplicates the left one and would
+        # confuse downstream column references.
+        merged = merged.drop(columns=[right_col], errors='ignore')
+
+    return merged
+
+
 def execute_query_spec(all_sheets: dict, spec: dict) -> dict:
     sheet = spec.get('sheet')
     if sheet not in all_sheets:
         raise QueryError(f'Sheet "{sheet}" not found')
-    df = all_sheets[sheet]
+    df = all_sheets[sheet].copy()
+
+    join_spec = spec.get('join')
+    if join_spec:
+        df = _apply_join(df, all_sheets, join_spec)
+
     original_row_count = len(df)
 
     for f in spec.get('filters') or []:

@@ -38,6 +38,8 @@ from services import (
 from excel_analyzer import analyze_excel_data, query_spreadsheet_data
 from pdf_report import build_insights_pdf, build_rfq_pdf
 from data_profiler import profile_workbook
+from sheet_orchestrator import detect_relationships, classify_sheet_roles, build_unified_schema
+from schema_mapper import build_schema_context
 
 app = FastAPI(title="Procure.ai Backend")
 
@@ -138,6 +140,8 @@ def _enrich_doc(doc: dict) -> dict:
         'data_preview': preview[:DATA_PREVIEW_CHAR_LIMIT],
         'data_preview_truncated': truncated,
         'profile': stored.get('profile'),
+        'unified_schema': stored.get('unified_schema'),
+        'schema_context': stored.get('schema_context'),
         # Server-local path, never echoed back in any API response — used internally so
         # the query engine can re-read the FULL workbook on demand instead of operating
         # on the (possibly truncated) text preview.
@@ -399,7 +403,21 @@ def queue_document_processing(doc_id: str, file_path: str, file_type: str, compa
             # Real pandas-computed sum/mean/min/max per numeric column, handed to the AI
             # alongside the text preview so it cites verified numbers instead of doing
             # its own (error-prone) arithmetic on a CSV snippet.
-            DOCUMENT_STORE[doc_id]["profile"] = profile_workbook(all_sheets)
+            profile = profile_workbook(all_sheets)
+            DOCUMENT_STORE[doc_id]["profile"] = profile
+
+            # Multi-sheet relationship detection: finds FK links between sheets by
+            # column name matching + value overlap, classifies each sheet's role
+            # (fact/dimension/reference), and builds a unified schema. Stored at
+            # upload time so every subsequent chat/report call can use it without
+            # re-reading the file.
+            relationships = detect_relationships(all_sheets)
+            roles = classify_sheet_roles(all_sheets, relationships)
+            unified_schema = build_unified_schema(all_sheets, profile, relationships, roles)
+            schema_context = build_schema_context(all_sheets, profile, relationships)
+            DOCUMENT_STORE[doc_id]["unified_schema"] = unified_schema
+            DOCUMENT_STORE[doc_id]["schema_context"] = schema_context
+
             DOCUMENT_STORE[doc_id]["status"] = "ready"
             TASK_STORE[task_id]["status"] = "completed"
     except Exception as e:
