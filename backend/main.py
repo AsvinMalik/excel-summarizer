@@ -401,7 +401,22 @@ async def list_documents(user_id: str):
 @app.get("/api/document/{doc_id}")
 async def get_document(doc_id: str):
     doc = retrieve_document(doc_id)
-    return JSONResponse(doc)
+    # bytes/parsed_csv_full are not JSON-serialisable — strip them before responding
+    safe = {k: v for k, v in doc.items() if not isinstance(v, (bytes, bytearray))}
+    return JSONResponse(safe)
+
+
+@app.get("/api/document/{doc_id}/sheets")
+async def get_document_sheets(doc_id: str):
+    stored = DOCUMENT_STORE.get(doc_id)
+    if not stored:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({
+        "doc_id": doc_id,
+        "sheet_names": stored.get("sheet_names", []),
+        "row_count": stored.get("row_count"),
+        "status": stored.get("status"),
+    })
 
 
 @app.get("/api/document/{doc_id}/sheet/{sheet_name}")

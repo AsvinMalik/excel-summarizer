@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Send,
   Upload,
@@ -35,6 +35,8 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
   const [selectedProvider, setSelectedProvider] = useState(
     () => localStorage.getItem('procure_ai_provider_key') || 'auto'
   );
+  const [selectorOpen, setSelectorOpen] = useState(false);
+  const selectorRef = useRef(null);
   const { user, logout } = useAuth();
   const messagesEnd = useRef(null);
 
@@ -48,6 +50,16 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
       setActiveSheetMap?.((prev) => ({ ...prev, [activeDocBackendId]: sheetName }));
     }
   };
+
+  useEffect(() => {
+    const onOutsideClick = (e) => {
+      if (selectorRef.current && !selectorRef.current.contains(e.target)) {
+        setSelectorOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onOutsideClick);
+    return () => document.removeEventListener('mousedown', onOutsideClick);
+  }, []);
 
   useEffect(() => {
     if (!user) return;
@@ -587,13 +599,85 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
 
         <div className="border-t border-gray-200 bg-white px-6 pt-4 pb-3">
           <QuickActions />
-          <div className="flex gap-3 mb-3">
+
+          {/* Input row */}
+          <div className="flex gap-2 items-center">
+            {/* Model selector trigger */}
+            <div className="relative" ref={selectorRef}>
+              <button
+                type="button"
+                onClick={() => setSelectorOpen((o) => !o)}
+                className="flex items-center gap-1.5 px-3 py-3 rounded-lg border border-gray-300 bg-white hover:border-blue-400 transition text-xs font-semibold text-gray-600 whitespace-nowrap"
+                title="Choose pipeline and API"
+              >
+                <span className={`w-2 h-2 rounded-full ${selectedModel === 'model_b' ? 'bg-violet-500' : 'bg-blue-500'}`} />
+                {MODEL_OPTIONS.find(m => m.value === selectedModel)?.label}
+                <span className="text-gray-400">·</span>
+                {PROVIDER_OPTIONS.find(p => p.value === selectedProvider)?.label}
+                <svg className={`w-3 h-3 text-gray-400 transition-transform ${selectorOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg>
+              </button>
+
+              {/* Floating popup */}
+              {selectorOpen && (
+                <div className="absolute bottom-full mb-2 left-0 z-50 w-72 bg-white rounded-2xl border border-gray-200 shadow-xl p-4">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-3">Pipeline</p>
+                  <div className="flex flex-col gap-1 mb-4">
+                    {MODEL_OPTIONS.map((m) => (
+                      <button
+                        key={m.value}
+                        type="button"
+                        onClick={() => { handleModelSelect(m.value); }}
+                        className={`flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-medium transition-all text-left ${
+                          selectedModel === m.value
+                            ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                            : 'text-gray-700 hover:bg-gray-50'
+                        }`}
+                      >
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${selectedModel === m.value ? 'bg-blue-500' : 'bg-gray-300'}`} />
+                        <span className="flex-1">
+                          <span className="font-semibold">{m.label}</span>
+                          <span className="ml-2 text-xs text-gray-400">{m.desc}</span>
+                        </span>
+                        {selectedModel === m.value && (
+                          <svg className="w-4 h-4 text-blue-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-3">API Provider</p>
+                  <div className="flex flex-col gap-1">
+                    {PROVIDER_OPTIONS.map((p) => (
+                      <button
+                        key={p.value}
+                        type="button"
+                        onClick={() => { handleProviderSelect(p.value); }}
+                        className={`flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-medium transition-all text-left ${
+                          selectedProvider === p.value
+                            ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                            : 'text-gray-700 hover:bg-gray-50'
+                        }`}
+                      >
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${selectedProvider === p.value ? 'bg-indigo-500' : 'bg-gray-300'}`} />
+                        <span className="flex-1">
+                          <span className="font-semibold">{p.label}</span>
+                          <span className="ml-2 text-xs text-gray-400">{p.desc}</span>
+                        </span>
+                        {selectedProvider === p.value && (
+                          <svg className="w-4 h-4 text-indigo-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
             <input
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-              placeholder="Ask about contract terms, vendor performance, spend analysis, RFQs..."
+              placeholder="Ask about contracts, vendor performance, spend analysis…"
               className="flex-1 px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
             />
             <button
@@ -603,47 +687,6 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
             >
               <Send size={18} />
             </button>
-          </div>
-
-          {/* Pipeline + API selectors — below the input, compact */}
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-            <div className="flex items-center gap-1.5">
-              <span className="text-[11px] font-medium text-gray-400 uppercase tracking-wide">Pipeline</span>
-              {MODEL_OPTIONS.map((m) => (
-                <button
-                  key={m.value}
-                  type="button"
-                  title={m.desc}
-                  onClick={() => handleModelSelect(m.value)}
-                  className={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold border transition-all ${
-                    selectedModel === m.value
-                      ? 'bg-blue-600 text-white border-blue-600'
-                      : 'bg-white text-gray-500 border-gray-300 hover:border-blue-400 hover:text-blue-600'
-                  }`}
-                >
-                  {m.label}
-                </button>
-              ))}
-            </div>
-            <div className="w-px h-4 bg-gray-200 hidden sm:block" />
-            <div className="flex items-center gap-1.5">
-              <span className="text-[11px] font-medium text-gray-400 uppercase tracking-wide">API</span>
-              {PROVIDER_OPTIONS.map((p) => (
-                <button
-                  key={p.value}
-                  type="button"
-                  title={p.desc}
-                  onClick={() => handleProviderSelect(p.value)}
-                  className={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold border transition-all ${
-                    selectedProvider === p.value
-                      ? 'bg-indigo-600 text-white border-indigo-600'
-                      : 'bg-white text-gray-500 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'
-                  }`}
-                >
-                  {p.label}
-                </button>
-              ))}
-            </div>
           </div>
         </div>
       </div>

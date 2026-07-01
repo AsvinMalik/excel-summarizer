@@ -153,7 +153,7 @@ async function exportRFQPdf({ draft }) {
 }
 
 async function getDocumentMeta(docId) {
-  const response = await fetch(`${BASE_URL}/api/document/${encodeURIComponent(docId)}`);
+  const response = await fetch(`${BASE_URL}/api/document/${encodeURIComponent(docId)}/sheets`);
   if (!response.ok) throw new Error(`Meta fetch failed: ${response.statusText}`);
   return response.json();
 }
