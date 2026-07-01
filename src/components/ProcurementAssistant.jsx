@@ -28,7 +28,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
   const [analyzing, setAnalyzing] = useState(false);
   const [downloadingInsights, setDownloadingInsights] = useState(false);
   const [selectedModel, setSelectedModel] = useState(
-    () => localStorage.getItem('procure_ai_model_key') || 'auto'
+    () => localStorage.getItem('procure_ai_model_key') || 'model_a'
   );
   const { user, logout } = useAuth();
   const messagesEnd = useRef(null);
@@ -416,13 +416,14 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
   );
 
   const MODEL_BADGE = {
-    PHI3_LOCAL:   { label: 'Phi3 · Local',    color: 'bg-emerald-100 text-emerald-700' },
-    GROQ:         { label: 'Groq · Llama 3.3', color: 'bg-purple-100 text-purple-700' },
-    CEREBRAS:     { label: 'Cerebras',          color: 'bg-orange-100 text-orange-700' },
-    OPENROUTER:   { label: 'OpenRouter',         color: 'bg-sky-100 text-sky-700' },
-    error:        { label: 'Model error',        color: 'bg-red-100 text-red-600' },
-    deterministic:               { label: 'Exact · No AI',  color: 'bg-gray-100 text-gray-500' },
-    'deterministic-query-engine':{ label: 'Query Engine',   color: 'bg-gray-100 text-gray-500' },
+    MODEL_B:      { label: 'Model B · Sandbox', color: 'bg-violet-100 text-violet-700' },
+    PHI3_LOCAL:   { label: 'Phi3 · Local',      color: 'bg-emerald-100 text-emerald-700' },
+    GROQ:         { label: 'Groq · Llama 3.3',  color: 'bg-purple-100 text-purple-700' },
+    CEREBRAS:     { label: 'Cerebras',           color: 'bg-orange-100 text-orange-700' },
+    OPENROUTER:   { label: 'OpenRouter',          color: 'bg-sky-100 text-sky-700' },
+    error:        { label: 'Model error',         color: 'bg-red-100 text-red-600' },
+    deterministic:               { label: 'Exact · No AI', color: 'bg-gray-100 text-gray-500' },
+    'deterministic-query-engine':{ label: 'Query Engine',  color: 'bg-gray-100 text-gray-500' },
   };
 
   const handleModelSelect = (value) => {

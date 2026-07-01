@@ -75,7 +75,11 @@ def create_chat_completion(
     user — NO silent fallback to a different model. The user explicitly chose this model
     and must know when it's unavailable so they can switch.
     """
-    if model_key and model_key not in ('auto', None):
+    # 'model_a' and 'model_b' are pipeline-level keys handled in procure_agent before
+    # this function is ever reached; treat them as 'auto' here so internal LLM calls
+    # made by model_b_agent (or any code path that passes model_a/model_b through)
+    # still use the best-available chain rather than failing on an unknown preset.
+    if model_key and model_key not in ('auto', 'model_a', 'model_b', None):
         return _call_pinned(messages, max_tokens, model_key)
     return _call_chain(messages, max_tokens)
 
