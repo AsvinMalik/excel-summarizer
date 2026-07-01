@@ -8,10 +8,79 @@ import json
 import sys
 import os
 import io
+import re as _re
 import pandas as pd
 import logging
 from datetime import datetime
 from time import time
+
+
+def _clean_sheet_headers(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalise Excel headers that pandas reads poorly.
+
+    Two common problems handled:
+    1. Merged top-row headers create 'Unnamed: N' continuation columns.
+       These are forward-filled with the parent name so 'Actual Q1' and three
+       'Unnamed' siblings become 'Actual Q1', 'Actual Q1_1', 'Actual Q1_2'.
+    2. Sheets with two header rows (a category row + a sub-column row) leave
+       the sub-header as the first data row.  Detected when >60% of the first
+       row values are short strings with <10% numeric values; those cells are
+       promoted to column names combined with the parent header above them.
+    """
+    if df.empty or len(df.columns) == 0:
+        return df
+
+    cols = list(df.columns)
+    unnamed_count = sum(1 for c in cols if str(c).startswith('Unnamed:'))
+
+    # ── Case 1: two-row header (merged category + sub-columns) ──────────────
+    if unnamed_count / max(len(cols), 1) > 0.25 and len(df) >= 1:
+        first_row = df.iloc[0]
+        non_null = [v for v in first_row if pd.notna(v) and str(v).strip() not in ('', 'nan')]
+        if len(non_null) >= 2:
+            str_vals = [v for v in non_null if isinstance(v, str)]
+            num_vals = [v for v in non_null
+                        if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            if (len(str_vals) / len(non_null) > 0.6
+                    and len(num_vals) / len(non_null) < 0.1):
+                # Promote first data row into column names
+                new_cols = []
+                seen: dict = {}
+                for orig_col, sub_val in zip(df.columns, first_row):
+                    parent = str(orig_col) if not str(orig_col).startswith('Unnamed') else ''
+                    sub = str(sub_val).strip() if pd.notna(sub_val) and str(sub_val) != 'nan' else ''
+                    if parent and sub and parent != sub:
+                        name = f'{parent} - {sub}'
+                    elif sub:
+                        name = sub
+                    elif parent:
+                        name = parent
+                    else:
+                        name = f'Col_{len(new_cols)}'
+                    # Deduplicate
+                    if name in seen:
+                        seen[name] += 1
+                        name = f'{name}_{seen[name]}'
+                    else:
+                        seen[name] = 0
+                    new_cols.append(name)
+                df = df.iloc[1:].reset_index(drop=True)
+                df.columns = new_cols
+                return df
+
+    # ── Case 2: single header row with Unnamed continuation columns ──────────
+    result_cols = list(df.columns)
+    last_named = ''
+    named_count: dict = {}
+    for i, c in enumerate(result_cols):
+        if str(c).startswith('Unnamed:'):
+            if last_named:
+                named_count[last_named] = named_count.get(last_named, 0) + 1
+                result_cols[i] = f'{last_named}_{named_count[last_named]}'
+        else:
+            last_named = str(c)
+    df.columns = result_cols
+    return df
 
 # ═══════════════════════════════════════════════════════════════
 # LOGGING SETUP - Monitor all API calls on your laptop
@@ -437,7 +506,10 @@ def queue_document_processing(doc_id: str, file_path: str, file_type: str, compa
             file_bytes = doc_data["bytes"]
             # sheet_name=None reads every sheet in the workbook (returns {name: DataFrame}),
             # not just the first one — a single-sheet read here was the original bug.
-            all_sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None)
+            all_sheets = {
+                name: _clean_sheet_headers(df)
+                for name, df in pd.read_excel(io.BytesIO(file_bytes), sheet_name=None).items()
+            }
             sheet_names = list(all_sheets.keys())
             total_rows = sum(len(df) for df in all_sheets.values())
 

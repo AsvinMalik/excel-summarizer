@@ -221,10 +221,24 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
       gradient: 'from-blue-50 to-blue-100',
       border: 'border-blue-200',
       text: 'text-blue-900',
-      buildPrompt: (activeDocument) =>
-        activeDocument
-          ? `Summarize "${activeDocument.name}" and highlight the key points.`
-          : 'Summarize the uploaded documents and highlight the key points.',
+      buildPrompt: (activeDocument) => {
+        const docRef = activeDocument ? `"${activeDocument.name}"` : 'the uploaded workbook';
+        return (
+          `Summarize ${docRef} sheet by sheet.\n\n` +
+          `For each sheet that contains real, filled-in data, write a section with:\n` +
+          `**## [Sheet Name]**\n` +
+          `- **Purpose** — what this sheet tracks (one sentence)\n` +
+          `- **Key figures** — the most important totals, averages, or metrics; use the exact numbers from the computed statistics provided in your context\n` +
+          `- **Top entries** — the top 3–5 rows or items if the sheet has rankings or customer/vendor breakdowns (e.g. top customers by revenue, highest cost line)\n` +
+          `- **Notable insights** — year-on-year changes, variances, trends, or anomalies worth flagging\n\n` +
+          `Rules:\n` +
+          `- Skip any sheet that is empty, has no filled numeric or text data, or is purely a visual/formatting template\n` +
+          `- Skip sheets where all values are blank or dashes\n` +
+          `- Do not make up figures — only cite numbers that appear in the computed statistics context\n` +
+          `- Keep each sheet section concise (4–8 bullet points max)\n` +
+          `- If a column or value is in Indian number format (Lakhs, Crores), say so clearly`
+        );
+      },
     },
     {
       id: 'extract-clauses',

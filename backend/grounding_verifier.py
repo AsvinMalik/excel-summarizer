@@ -22,16 +22,21 @@ import re
 import pandas as pd
 
 _MAGNITUDE = {
+    # Western
     'k': 1_000, 'thousand': 1_000,
     'm': 1_000_000, 'mn': 1_000_000, 'million': 1_000_000,
     'b': 1_000_000_000, 'bn': 1_000_000_000, 'billion': 1_000_000_000,
+    # Indian number system (lakh = 100,000 ; crore = 10,000,000)
+    'l': 100_000, 'lac': 100_000, 'lacs': 100_000, 'lakh': 100_000, 'lakhs': 100_000,
+    'cr': 10_000_000, 'crore': 10_000_000, 'crores': 10_000_000,
 }
 
-# Matches "$1,800,000", "1800000", "1.8 million", "2.5M", etc. — a leading $ or a
-# magnitude word/letter immediately after the digits both count as "this is a real
-# quantity claim", not incidental text.
+# Matches "$1,800,000", "₹10.47 Crore", "1.8 million", "2.5M", "51.6 Lakhs", etc.
+# A leading currency symbol ($ or ₹) or a magnitude word/abbreviation immediately
+# after the digits marks a real quantity claim — not incidental text.
 _NUMBER_RE = re.compile(
-    r'(?<![\w.])\$?(\d[\d,]*(?:\.\d+)?)\s*(thousand|million|billion|mn|bn|[kmb])?(?![\w%])',
+    r'(?<![\w.])[$₹]?\s*(\d[\d,]*(?:\.\d+)?)\s*'
+    r'(thousand|million|billion|lakhs?|lacs?|crores?|mn|bn|[kmb])?(?![\w%])',
     re.IGNORECASE,
 )
 _YEAR_RE = re.compile(r'^(19|20)\d{2}$')
@@ -55,10 +60,13 @@ def collect_known_numeric_values(all_sheets: dict, max_groupby_categories: int =
             for v in series:
                 known.add(round(float(v), 2))
             if len(series):
-                known.add(round(float(series.sum()), 2))
-                known.add(round(float(series.mean()), 2))
-                known.add(round(float(series.min()), 2))
-                known.add(round(float(series.max()), 2))
+                for agg in (series.sum(), series.mean(), series.min(), series.max()):
+                    v = round(float(agg), 2)
+                    known.add(v)
+                    # Also register lakh-scale and crore-scale so the AI writing
+                    # "₹51.6 Crore" for a raw value of 516000000 still passes.
+                    known.add(round(v / 100_000, 4))    # in Lakhs
+                    known.add(round(v / 10_000_000, 4)) # in Crores
 
         for cat_col in categorical_cols:
             try:

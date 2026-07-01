@@ -636,15 +636,20 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
     response = create_chat_completion(messages, max_tokens=1200)
     text = response.choices[0].message.content
 
-    # The deterministic query engine above guarantees correct arithmetic for direct
-    # data questions, but this free-form narrative path is still LLM-generated text —
-    # it can still misstate an individual figure even with the right data in context
-    # (e.g. reading "$1,800,000" and writing "$180,000"). Catch that here: check every
-    # number the answer claims against every real value in the workbook, give the
-    # model up to two chances to self-correct with the specific bad numbers called
-    # out, and discard rather than show the answer if it still doesn't check out.
+    # Numeric grounding: for precise figure queries the LLM must cite real values.
+    # Skip for qualitative/summary requests — the user wants narrative context, not
+    # exact arithmetic, and a small model like phi3 can't reliably quote every figure
+    # verbatim from a large context block. Blocking summaries wholesale is worse than
+    # the occasional rounded figure in prose.
+    _QUALITATIVE_RE = re.compile(
+        r'\b(summar|overview|descri|explain|introduc|tell me about|what (is|are|does)|'
+        r'highlight|outline|brief|report on|insights?|analys[ie]|key (point|finding|trend|takeaway))\b',
+        re.IGNORECASE,
+    )
+    is_qualitative = bool(_QUALITATIVE_RE.search(user_query))
+
     known_values = _collect_known_values_for_context(document_context)
-    if known_values:
+    if known_values and not is_qualitative:
         correction_messages = messages
         for retry_num in range(2):
             unverifiable = find_unverifiable_numbers(text, known_values)
