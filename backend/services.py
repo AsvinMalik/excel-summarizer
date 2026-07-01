@@ -618,6 +618,14 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
     if context_block:
         messages.append({'role': 'system', 'content': context_block})
 
+    active_sheet = (document_context or {}).get('active_document', {}).get('active_sheet') if document_context else None
+    sheet_scope_note = (
+        f' The user is currently previewing sheet "{active_sheet}" — only that sheet\'s '
+        f'data is included in your context for this turn. If the user asks about data from '
+        f'a different sheet by name, tell them to switch to that sheet in the preview panel '
+        f'rather than answering from memory of a prior turn\'s different sheet.'
+    ) if active_sheet else ''
+
     messages.append({
         'role': 'system',
         'content': (
@@ -638,6 +646,7 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
             'truth for any sum/total/average/count claim about that column — quote them directly '
             'rather than re-adding values from the CSV sample yourself, since manual arithmetic over '
             'a text preview is exactly how past answers got the scale of a number wrong.'
+            + sheet_scope_note
         ),
     })
     messages.append({'role': 'user', 'content': user_query})

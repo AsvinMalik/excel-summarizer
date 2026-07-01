@@ -152,6 +152,17 @@ async function exportRFQPdf({ draft }) {
   return response.blob();
 }
 
+async function fetchSheetData({ docId, sheetName, offset = 0, limit = 100 }) {
+  const params = new URLSearchParams({ offset, limit });
+  const response = await fetch(
+    `${BASE_URL}/api/document/${encodeURIComponent(docId)}/sheet/${encodeURIComponent(sheetName)}?${params}`
+  );
+  if (!response.ok) {
+    throw new Error(`Sheet data fetch failed: ${response.statusText}`);
+  }
+  return response.json();
+}
+
 export {
   uploadDocument,
   sendChat,
@@ -164,4 +175,5 @@ export {
   autoFillRFQ,
   refineRFQDraft,
   exportRFQPdf,
+  fetchSheetData,
 };

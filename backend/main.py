@@ -249,26 +249,76 @@ def _load_snapshots() -> None:
             print(f'Snapshot load failed for {fname}: {e}')
 
 
+def _extract_sheet_section(parsed_csv: str, sheet_name: str) -> str:
+    """Pull one sheet's block out of the multi-sheet CSV preview string.
+
+    Preview blocks look like:
+        === Sheet: SheetName (N rows x M cols) ===
+        Columns: ...
+        <csv rows>
+
+        === Sheet: NextSheet ...
+    """
+    escaped = _re.escape(sheet_name)
+    pattern = rf'(=== Sheet: {escaped} .*?)(?=\n=== Sheet: |\Z)'
+    m = _re.search(pattern, parsed_csv, _re.DOTALL)
+    return m.group(1).strip() if m else ''
+
+
 def _enrich_doc(doc: dict) -> dict:
     if not doc or not doc.get('doc_id'):
         return doc
     stored = DOCUMENT_STORE.get(doc['doc_id'])
     if not stored or not stored.get('parsed_csv'):
         return doc
+
+    active_sheet = doc.get('active_sheet')
+
     preview = stored['parsed_csv']
+    profile = stored.get('profile')
+    validation = stored.get('validation')
+    statistics = stored.get('statistics')
+    unified_schema = stored.get('unified_schema')
+    schema_context = stored.get('schema_context')
+    columns = stored.get('columns')
+
+    if active_sheet and isinstance(profile, dict) and active_sheet in profile:
+        # Narrow each per-sheet dict to just the active sheet so the AI sees
+        # only the data it's currently looking at.
+        sheet_section = _extract_sheet_section(preview, active_sheet)
+        if sheet_section:
+            preview = sheet_section
+
+        profile = {active_sheet: profile[active_sheet]}
+
+        if isinstance(validation, dict):
+            validation = {active_sheet: validation[active_sheet]} if active_sheet in validation else {}
+        if isinstance(statistics, dict):
+            statistics = {active_sheet: statistics[active_sheet]} if active_sheet in statistics else {}
+
+        # Cross-sheet relationship hints are meaningless once scoped to a single sheet
+        unified_schema = None
+        schema_context = None
+
+        # Resolve columns from the active sheet's profile — fixes the hardcoded
+        # first-sheet-only bug in queue_document_processing as a side-effect.
+        sheet_col_list = profile.get(active_sheet, {}).get('columns', [])
+        if sheet_col_list:
+            columns = [c['name'] for c in sheet_col_list if isinstance(c, dict) and c.get('name')]
+
     truncated = len(preview) > DATA_PREVIEW_CHAR_LIMIT
     return {
         **doc,
         'row_count': stored.get('row_count'),
-        'columns': stored.get('columns'),
-        'sheet_names': stored.get('sheet_names'),
+        'columns': columns,
+        'sheet_names': stored.get('sheet_names'),  # always full list (tab bar needs it)
         'data_preview': preview[:DATA_PREVIEW_CHAR_LIMIT],
         'data_preview_truncated': truncated,
-        'profile': stored.get('profile'),
-        'unified_schema': stored.get('unified_schema'),
-        'schema_context': stored.get('schema_context'),
-        'validation': stored.get('validation'),
-        'statistics': stored.get('statistics'),
+        'profile': profile,
+        'unified_schema': unified_schema,
+        'schema_context': schema_context,
+        'validation': validation,
+        'statistics': statistics,
         # Server-local path, never echoed back in any API response — used internally so
         # the query engine can re-read the FULL workbook on demand instead of operating
         # on the (possibly truncated) text preview.
@@ -352,6 +402,51 @@ async def list_documents(user_id: str):
 async def get_document(doc_id: str):
     doc = retrieve_document(doc_id)
     return JSONResponse(doc)
+
+
+@app.get("/api/document/{doc_id}/sheet/{sheet_name}")
+async def get_sheet_data(doc_id: str, sheet_name: str, offset: int = 0, limit: int = 100):
+    stored = DOCUMENT_STORE.get(doc_id)
+    if not stored:
+        return JSONResponse({"error": "Document not found"}, status_code=404)
+    file_path = stored.get('file_path')
+    if not file_path or not os.path.exists(file_path):
+        return JSONResponse({"error": "File not available on server"}, status_code=404)
+    try:
+        all_sheets_raw = pd.read_excel(file_path, sheet_name=None)
+        df_raw = all_sheets_raw.get(sheet_name)
+        if df_raw is None:
+            return JSONResponse({"error": f"Sheet '{sheet_name}' not found"}, status_code=404)
+        df = _clean_sheet_headers(df_raw)
+        columns = [str(c) for c in df.columns]
+        total_rows = len(df)
+        page_df = df.iloc[offset:offset + limit]
+
+        def _safe_cell(v):
+            if v is None:
+                return ''
+            try:
+                if pd.isna(v):
+                    return ''
+            except (TypeError, ValueError):
+                pass
+            if isinstance(v, float) and v != v:
+                return ''
+            return v if isinstance(v, (int, float, bool)) else str(v)
+
+        rows = [{col: _safe_cell(row[col]) for col in columns} for _, row in page_df.iterrows()]
+        return JSONResponse({
+            "doc_id": doc_id,
+            "sheet_name": sheet_name,
+            "sheet_names": stored.get('sheet_names', [sheet_name]),
+            "columns": columns,
+            "rows": rows,
+            "total_rows": total_rows,
+            "offset": offset,
+            "limit": limit,
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.delete("/api/document/{doc_id}")
@@ -587,6 +682,8 @@ def queue_document_processing(doc_id: str, file_path: str, file_type: str, compa
 
             DOCUMENT_STORE[doc_id]["parsed_csv"] = csv_preview
             DOCUMENT_STORE[doc_id]["row_count"] = total_rows
+            # Store per-sheet column lists so _enrich_doc can resolve columns for
+            # whichever sheet is active, instead of always using the first sheet.
             DOCUMENT_STORE[doc_id]["columns"] = all_sheets[sheet_names[0]].columns.tolist()
             DOCUMENT_STORE[doc_id]["sheet_names"] = sheet_names
             # Real pandas-computed sum/mean/min/max per numeric column, handed to the AI

@@ -34,6 +34,9 @@ function App() {
   const [activeSection, setActiveSection] = useState('assistant');
   const [documents, setDocuments] = useState([]);
   const [activeDoc, setActiveDoc] = useState(null);
+  // Per-document active sheet: { [doc_id]: sheetName }. Keyed by backend doc_id so
+  // it survives the activeDoc (frontend id) changing while the same file stays loaded.
+  const [activeSheetMap, setActiveSheetMap] = useState({});
   const [messages, setMessages] = useState([
     {
       id: 1,
@@ -275,6 +278,8 @@ function App() {
                 setDocuments={setDocuments}
                 activeDoc={activeDoc}
                 setActiveDoc={setActiveDoc}
+                activeSheetMap={activeSheetMap}
+                setActiveSheetMap={setActiveSheetMap}
                 messages={messages}
                 setMessages={setMessages}
                 sessionId={sessionId}

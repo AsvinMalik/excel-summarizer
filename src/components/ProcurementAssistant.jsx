@@ -22,8 +22,9 @@ import { saveDocumentMetadata, deleteDocumentMetadata, getUserDocuments, saveCha
 import { useAuth } from '../context/AuthContext';
 import { MODEL_OPTIONS } from '../config/modelOptions';
 import { PROVIDER_OPTIONS } from '../config/providerOptions';
+import SheetPreview from './SheetPreview';
 
-const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc, messages, setMessages, sessionId }) => {
+const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc, activeSheetMap, setActiveSheetMap, messages, setMessages, sessionId }) => {
   const [input, setInput] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
@@ -36,6 +37,17 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
   );
   const { user, logout } = useAuth();
   const messagesEnd = useRef(null);
+
+  // Derive the currently active sheet for the selected document
+  const activeDocument = activeDoc ? documents.find((d) => d.id === activeDoc) : null;
+  const activeDocBackendId = activeDocument?.doc_id || null;
+  const activeSheet = activeDocBackendId ? (activeSheetMap?.[activeDocBackendId] || null) : null;
+
+  const handleSheetChange = (sheetName) => {
+    if (activeDocBackendId) {
+      setActiveSheetMap?.((prev) => ({ ...prev, [activeDocBackendId]: sheetName }));
+    }
+  };
 
   useEffect(() => {
     if (!user) return;
@@ -69,10 +81,16 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
     setAnalyzing(true);
 
     try {
-      const activeDocument = activeDoc ? documents.find((doc) => doc.id === activeDoc) : null;
+      const activeDocumentObj = activeDoc ? documents.find((doc) => doc.id === activeDoc) : null;
       const context = {
-        active_document: activeDocument
-          ? { doc_id: activeDocument.doc_id, name: activeDocument.name, type: activeDocument.type, status: activeDocument.status }
+        active_document: activeDocumentObj
+          ? {
+              doc_id: activeDocumentObj.doc_id,
+              name: activeDocumentObj.name,
+              type: activeDocumentObj.type,
+              status: activeDocumentObj.status,
+              active_sheet: activeSheet || undefined,
+            }
           : null,
         documents: documents.map((doc) => ({ doc_id: doc.doc_id, id: doc.id, name: doc.name, type: doc.type, status: doc.status })),
       };
@@ -116,10 +134,15 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
     if (downloadingInsights) return;
     setDownloadingInsights(true);
     try {
-      const activeDocument = activeDoc ? documents.find((doc) => doc.id === activeDoc) : null;
+      const activeDocumentObj = activeDoc ? documents.find((doc) => doc.id === activeDoc) : null;
       const context = {
-        active_document: activeDocument
-          ? { doc_id: activeDocument.doc_id, name: activeDocument.name, type: activeDocument.type, status: activeDocument.status }
+        active_document: activeDocumentObj
+          ? {
+              doc_id: activeDocumentObj.doc_id,
+              name: activeDocumentObj.name,
+              type: activeDocumentObj.type,
+              status: activeDocumentObj.status,
+            }
           : null,
         documents: documents.map((doc) => ({ doc_id: doc.doc_id, id: doc.id, name: doc.name, type: doc.type, status: doc.status })),
       };
@@ -501,7 +524,23 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
     <div className="h-[85vh] bg-slate-50 flex overflow-hidden rounded-[2rem] border border-slate-200 shadow-soft">
       <Sidebar />
 
-      <div className="flex-1 flex flex-col">
+      {/* Sheet preview panel — always rendered; shows placeholder when no doc selected */}
+      <div className="w-[42%] min-w-0 border-r border-slate-200 flex flex-col overflow-hidden shrink-0">
+        <div className="px-4 py-2 border-b border-slate-200 bg-white shrink-0">
+          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+            {activeDocument ? activeDocument.name : 'Data Preview'}
+          </p>
+        </div>
+        <div className="flex-1 min-h-0">
+          <SheetPreview
+            doc={activeDocument}
+            activeSheet={activeSheet}
+            onSheetChange={handleSheetChange}
+          />
+        </div>
+      </div>
+
+      <div className="flex-1 flex flex-col min-w-0">
         <div className="border-b border-gray-200 bg-white px-6 py-4 flex items-center justify-between">
           <button onClick={() => setSidebarOpen(!sidebarOpen)} className="lg:hidden">
             <Menu size={24} />

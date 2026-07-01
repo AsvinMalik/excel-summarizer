@@ -122,8 +122,13 @@ def _format_result(value: Any) -> str:
     if value is None:
         return (
             'The code ran successfully but did not assign anything to `result`. '
-            'Try rephrasing the question or switch to Model A.'
+            'Try rephrasing the question more specifically (e.g. "total of column X"), '
+            'or switch to **Model A**.'
         )
+
+    # If the code set result to the "cannot determine" sentinel, pass it through cleanly.
+    if isinstance(value, str) and 'cannot determine' in value.lower():
+        return value
 
     if isinstance(value, pd.Series):
         value = value.reset_index()
@@ -184,14 +189,15 @@ def model_b_agent(
         return _wrap('deterministic', refusal)
 
     # Model B is a pandas code-execution sandbox — it answers precise data queries
-    # (totals, rankings, filters, counts). Narrative/summary questions ("summarize sheet
-    # by sheet", "extract clauses", "write a report") can't be answered by pandas code;
-    # attempting to generate code for them always fails. Detect and redirect immediately.
+    # (totals, rankings, filters, counts). Purely narrative tasks ("summarize sheet by
+    # sheet", "explain the contract", "write a report") can't be answered by pandas code.
+    # Detect and redirect immediately. Note: "analyze" and "what is X" are kept out of
+    # this pattern — "analyze total spend" and "what is the average price" are valid data
+    # queries Model B can handle perfectly well.
     _NARRATIVE_RE = re.compile(
-        r'\b(summar|overview|descri|explain|introduc|tell\s+me\s+about|'
+        r'\b(summar|overview|explain|introduc|tell\s+me\s+about|'
         r'highlight|outline|brief|report\s+on|write\s+a\s+report|build\s+(a\s+)?report|'
-        r'insights?|analys[ie]|key\s+(point|finding|trend|takeaway)|'
-        r'extract\s+clause|generate\s+rfq|what\s+(is|are|does))\b',
+        r'key\s+(point|finding|trend|takeaway)|extract\s+clause|generate\s+rfq)\b',
         re.IGNORECASE,
     )
     if _NARRATIVE_RE.search(user_query):
@@ -223,18 +229,35 @@ def model_b_agent(
     except Exception as exc:
         return _wrap('MODEL_B', f'Could not read the data file: {exc}')
 
-    schema = _schema_hint(all_sheets)
+    # If the user has a specific sheet selected in the preview panel, scope the code
+    # generation to that sheet only — simpler prompt, more reliable code.
+    active_sheet = doc.get('active_sheet')
+    if active_sheet and active_sheet in all_sheets:
+        schema_sheets = {active_sheet: all_sheets[active_sheet]}
+        scope_note = f'Focus your code on the sheet "{active_sheet}" (variable: `{_var_name(active_sheet)}`).\n'
+    else:
+        schema_sheets = all_sheets
+        scope_note = ''
+
+    schema = _schema_hint(schema_sheets)
 
     code_prompt = (
         'You are a Python/pandas data analyst. An Excel workbook has been loaded into '
         'pandas DataFrames. Use the exact variable names listed below.\n\n'
         f'Available data:\n{schema}\n\n'
+        f'{scope_note}'
         f'Write Python/pandas code to answer: "{user_query}"\n\n'
         'Rules:\n'
         '- Store the final answer in a variable called `result`\n'
         '- `result` may be a string, number, pandas DataFrame, or Series\n'
         '- Do NOT use open(), os, sys, subprocess, or any file/network I/O\n'
-        '- Use the exact variable names shown above for each sheet\n'
+        '- Use the EXACT variable names shown above for each sheet (e.g. df_Sheet1)\n'
+        '- Always reference columns by bracket notation with the exact name from the schema '
+        '(e.g. df["Column Name"], never df.column_name) — column names are case-sensitive and '
+        'may contain spaces, slashes, or parentheses\n'
+        '- Always call .dropna(subset=[col]) before aggregating to avoid NaN errors\n'
+        '- Convert currency/number columns with pd.to_numeric(df[col], errors="coerce") '
+        'if they might contain strings\n'
         '- If the data cannot answer the question, set result = '
         '"Cannot determine from the available data."\n\n'
         'Return ONLY valid Python code — no markdown fences, no explanation.'
