@@ -571,12 +571,12 @@ def _try_answer_data_query(user_query: str, document_context: dict = None) -> Op
     return _format_query_result(spec, result)
 
 
-def procure_agent(user_query: str, document_context: dict = None, session_state: dict = None, model_key: str = 'auto') -> dict:
+def procure_agent(user_query: str, document_context: dict = None, session_state: dict = None, model_key: str = 'model_a', provider_key: str = 'auto') -> dict:
     # MODEL_B: Pandas sandbox — LLM generates & executes code against real data.
     # Routes to a completely separate pipeline; lazy import avoids circular dependency.
     if model_key == 'model_b':
         from model_b_agent import model_b_agent
-        return model_b_agent(user_query, document_context, session_state)
+        return model_b_agent(user_query, document_context, session_state, provider_key=provider_key)
 
     structural_answer = _try_answer_structural_question(user_query, document_context)
     if structural_answer:
@@ -642,7 +642,7 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
     })
     messages.append({'role': 'user', 'content': user_query})
 
-    response = create_chat_completion(messages, max_tokens=1200, model_key=model_key)
+    response = create_chat_completion(messages, max_tokens=1200, model_key=provider_key)
     text = response.choices[0].message.content
 
     # Numeric grounding: for precise figure queries the LLM must cite real values.
@@ -676,7 +676,7 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
                     'there in the context, use it normally.'
                 )},
             ]
-            retry_response = create_chat_completion(correction_messages, max_tokens=1200, model_key=model_key)
+            retry_response = create_chat_completion(correction_messages, max_tokens=1200, model_key=provider_key)
             text = retry_response.choices[0].message.content
         else:
             if find_unverifiable_numbers(text, known_values):

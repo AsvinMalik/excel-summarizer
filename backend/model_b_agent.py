@@ -165,6 +165,7 @@ def model_b_agent(
     user_query: str,
     document_context: Optional[dict] = None,
     session_state: Optional[dict] = None,
+    provider_key: str = 'auto',
 ) -> dict:
     """
     MODEL_B public entry point — mirrors the shape of procure_agent's return value.
@@ -249,6 +250,7 @@ def model_b_agent(
             {'role': 'user', 'content': code_prompt},
         ],
         max_tokens=700,
+        model_key=provider_key,
     )
     code = _extract_code(code_resp.choices[0].message.content)
 
@@ -269,6 +271,7 @@ def model_b_agent(
                 )},
             ],
             max_tokens=700,
+            model_key=provider_key,
         )
         fixed_code = _extract_code(fix_resp.choices[0].message.content)
         out = _run_sandbox(fixed_code, all_sheets)

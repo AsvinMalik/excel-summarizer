@@ -165,7 +165,8 @@ class ConversationMessage(BaseModel):
     session_id: str
     user_query: str
     context: Optional[dict] = None
-    model_key: Optional[str] = 'auto'  # 'auto' | 'phi3' | 'groq' | 'cerebras' | 'openrouter'
+    model_key: Optional[str] = 'model_a'    # 'model_a' | 'model_b' — pipeline selector
+    provider_key: Optional[str] = 'auto'    # 'auto' | 'phi3' | 'groq' | 'cerebras' | 'openrouter'
 
 class ExportRequest(BaseModel):
     content: dict
@@ -312,7 +313,8 @@ async def chat(request: ConversationMessage):
         user_query=request.user_query,
         document_context=enriched_context,
         session_state=load_session(request.session_id),
-        model_key=request.model_key or 'auto',
+        model_key=request.model_key or 'model_a',
+        provider_key=request.provider_key or 'auto',
     )
     elapsed_ms = round((time() - t0) * 1000)
     save_conversation(request.session_id, request.user_query, response)

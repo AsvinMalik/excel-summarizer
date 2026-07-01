@@ -21,6 +21,7 @@ import { uploadDocument, sendChat, downloadInsightsPdf } from '../services/api';
 import { saveDocumentMetadata, deleteDocumentMetadata, getUserDocuments, saveChatMessage } from '../services/firestoreService';
 import { useAuth } from '../context/AuthContext';
 import { MODEL_OPTIONS } from '../config/modelOptions';
+import { PROVIDER_OPTIONS } from '../config/providerOptions';
 
 const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc, messages, setMessages, sessionId }) => {
   const [input, setInput] = useState('');
@@ -29,6 +30,9 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
   const [downloadingInsights, setDownloadingInsights] = useState(false);
   const [selectedModel, setSelectedModel] = useState(
     () => localStorage.getItem('procure_ai_model_key') || 'model_a'
+  );
+  const [selectedProvider, setSelectedProvider] = useState(
+    () => localStorage.getItem('procure_ai_provider_key') || 'auto'
   );
   const { user, logout } = useAuth();
   const messagesEnd = useRef(null);
@@ -73,7 +77,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
         documents: documents.map((doc) => ({ doc_id: doc.doc_id, id: doc.id, name: doc.name, type: doc.type, status: doc.status })),
       };
 
-      const response = await sendChat({ sessionId, userQuery: userText, context, modelKey: forceModelKey || selectedModel });
+      const response = await sendChat({ sessionId, userQuery: userText, context, modelKey: forceModelKey || selectedModel, providerKey: selectedProvider });
       const assistantText = Array.isArray(response.response)
         ? response.response
             .map((block) => (typeof block === 'string' ? block : block.text || JSON.stringify(block)))
@@ -434,6 +438,11 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
     localStorage.setItem('procure_ai_model_key', value);
   };
 
+  const handleProviderSelect = (value) => {
+    setSelectedProvider(value);
+    localStorage.setItem('procure_ai_provider_key', value);
+  };
+
   const MessageBubble = ({ msg }) => (
     <div className={`mb-4 flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
       <div className={`px-4 py-3 rounded-lg ${msg.type === 'user' ? 'max-w-2xl' : 'max-w-[min(94%,72rem)]'} ${
@@ -538,28 +547,53 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
 
         <div className="border-t border-gray-200 bg-white p-6">
           {/* Model selector */}
-          <div className="flex items-center gap-2 mb-4">
-            <span className="text-xs font-medium text-gray-500 whitespace-nowrap">Model:</span>
-            <div className="flex gap-1 flex-wrap">
-              {MODEL_OPTIONS.map((m) => (
-                <button
-                  key={m.value}
-                  type="button"
-                  title={m.desc}
-                  onClick={() => handleModelSelect(m.value)}
-                  className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${
-                    selectedModel === m.value
-                      ? 'bg-blue-600 text-white border-blue-600 shadow'
-                      : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400 hover:text-blue-600'
-                  }`}
-                >
-                  {m.label}
-                </button>
-              ))}
+          <div className="flex flex-col gap-2 mb-4">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium text-gray-500 w-16 shrink-0">Pipeline:</span>
+              <div className="flex gap-1 flex-wrap">
+                {MODEL_OPTIONS.map((m) => (
+                  <button
+                    key={m.value}
+                    type="button"
+                    title={m.desc}
+                    onClick={() => handleModelSelect(m.value)}
+                    className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${
+                      selectedModel === m.value
+                        ? 'bg-blue-600 text-white border-blue-600 shadow'
+                        : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400 hover:text-blue-600'
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+              <span className="text-xs text-gray-400 hidden sm:block">
+                {MODEL_OPTIONS.find(m => m.value === selectedModel)?.desc}
+              </span>
             </div>
-            <span className="text-xs text-gray-400 hidden sm:block">
-              {MODEL_OPTIONS.find(m => m.value === selectedModel)?.desc}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium text-gray-500 w-16 shrink-0">API:</span>
+              <div className="flex gap-1 flex-wrap">
+                {PROVIDER_OPTIONS.map((p) => (
+                  <button
+                    key={p.value}
+                    type="button"
+                    title={p.desc}
+                    onClick={() => handleProviderSelect(p.value)}
+                    className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${
+                      selectedProvider === p.value
+                        ? 'bg-indigo-600 text-white border-indigo-600 shadow'
+                        : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              <span className="text-xs text-gray-400 hidden sm:block">
+                {PROVIDER_OPTIONS.find(p => p.value === selectedProvider)?.desc}
+              </span>
+            </div>
           </div>
           <QuickActions />
           <div className="flex gap-3">
