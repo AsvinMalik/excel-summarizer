@@ -564,11 +564,304 @@ def _try_answer_data_query(user_query: str, document_context: dict = None) -> Op
         result = execute_query_spec(all_sheets, spec)
     except Exception:
         # Covers QueryError (bad sheet/column from the spec) and any pandas failure.
-        # Never surface a broken/partial answer — fall through to the normal grounded
-        # LLM-with-profile-context flow instead.
-        return None
+        # Phase 3 contract: never surface a broken/partial answer AND never silently
+        # drop to the prose path without telling it the engine failed.  Return a
+        # sentinel dict so procure_agent can inject an honest-failure note.
+        return {'_engine_failed': True}
 
     return _format_query_result(spec, result)
+
+
+# ── Phase 4: Whole-workbook map-reduce analysis ───────────────────────────────
+
+# Conservative per-chunk budget: fits Phi3's ~4096-token context with system
+# prompt and question overhead.  Each chunk = one or more sheets whose combined
+# content block stays under this limit.
+_CHUNK_CHAR_BUDGET = 6_000
+
+# Cap per-chunk summary length so the reduce step's input stays manageable
+# even on a 30-sheet workbook.
+_MAP_MAX_TOKENS = 500
+_REDUCE_MAX_TOKENS = 1_800
+
+
+def _build_sheet_content_block(sheet_name: str, sheet_profile: dict, sheet_stats: dict) -> str:
+    """Build a compact content block describing one sheet for the map step."""
+    cols = sheet_profile.get('columns', [])
+    col_names = [c['name'] for c in cols if isinstance(c, dict) and c.get('name')]
+    row_count = sheet_profile.get('row_count', 0)
+
+    parts = [f'Sheet: "{sheet_name}" | {row_count} rows × {len(cols)} columns']
+
+    if col_names:
+        shown = col_names[:25]
+        suffix = f' … (+{len(col_names) - 25} more)' if len(col_names) > 25 else ''
+        parts.append(f'Columns: {", ".join(shown)}{suffix}')
+
+    # Numeric column summaries from the pre-computed statistics block
+    stats_text = format_statistics_block(sheet_stats or {})
+    if stats_text:
+        parts.append(stats_text[:1_200])  # cap per-sheet stats contribution
+
+    # Category breakdowns from the profile (e.g. spend by vendor)
+    bd_text = format_breakdowns_block(sheet_profile.get('breakdowns'))
+    if bd_text:
+        parts.append(bd_text[:800])
+
+    return '\n'.join(parts)
+
+
+def _chunk_sheets(sheet_blocks: dict) -> list:
+    """Group sheets into chunks whose combined content fits _CHUNK_CHAR_BUDGET.
+
+    Chunks by actual content size (not sheet count) so that a 392-row × 78-col
+    sheet and a 2-row × 5-col sheet don't end up in the same group just because
+    they're adjacent in the workbook.  Per the MD: equal-count splitting badly
+    unbalances complexity when sheet sizes vary by two orders of magnitude.
+    """
+    chunks: list = []
+    current: list = []
+    current_size = 0
+
+    for sheet_name, block in sheet_blocks.items():
+        block_size = len(block)
+        if current and current_size + block_size > _CHUNK_CHAR_BUDGET:
+            chunks.append(current)
+            current = [sheet_name]
+            current_size = block_size
+        else:
+            current.append(sheet_name)
+            current_size += block_size
+
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _map_reduce_analysis(
+    user_query: str,
+    document_context: Optional[dict],
+    provider_key: str = 'auto',
+) -> dict:
+    """Phase 4: whole-workbook map-reduce analysis.
+
+    Algorithm
+    ---------
+    1. Collect all sheets from the FULL (unscoped) profile + statistics.
+    2. Build a per-sheet content block for each sheet (columns + stats + breakdowns).
+    3. Chunk sheets by content size against _CHUNK_CHAR_BUDGET so each map call
+       fits within the active provider's context window.
+    4. MAP: call the LLM once per chunk to produce a partial summary.
+    5. REDUCE: combine partial summaries (with cross-sheet relationship context)
+       into a final structured answer.
+
+    For large workbooks (many chunks), applies hierarchical merging: pairs of
+    partial summaries are merged in layers rather than combining all at once in
+    one final step — prevents cross-sheet relationships from being dropped at the
+    reduce boundary.
+
+    Failure contract (Phase 3): every exit path either produces a grounded
+    answer or explicitly states what couldn't be computed, never a silent guess.
+    """
+    # ── Locate the active document ───────────────────────────────────────────
+    active_document = (document_context or {}).get('active_document')
+    documents = (document_context or {}).get('documents') or []
+    candidates = [
+        d for d in ([active_document] if active_document else documents)
+        if d and d.get('file_path')
+    ]
+    if not candidates:
+        return _agent_response(
+            'No document is loaded. Upload a spreadsheet first, then ask again.',
+            model='map-reduce',
+        )
+
+    doc = candidates[0]
+
+    # Use full (unscoped) profile — active-sheet scope is irrelevant here
+    profile = doc.get('full_profile') or doc.get('profile') or {}
+    statistics = doc.get('full_statistics') or doc.get('statistics') or {}
+    unified_schema = doc.get('full_unified_schema') or doc.get('unified_schema') or {}
+
+    if not profile:
+        return _agent_response(
+            'The workbook is still processing. Please try again in a moment.',
+            model='map-reduce',
+        )
+
+    doc_name = doc.get('name', 'the workbook')
+
+    # ── Build per-sheet content blocks ───────────────────────────────────────
+    sheet_blocks: Dict[str, str] = {}
+    for sheet_name, sheet_profile in profile.items():
+        sheet_stats = statistics.get(sheet_name, {})
+        sheet_blocks[sheet_name] = _build_sheet_content_block(
+            sheet_name, sheet_profile, sheet_stats
+        )
+
+    all_sheet_names = list(sheet_blocks.keys())
+    chunks = _chunk_sheets(sheet_blocks)
+
+    # ── Cross-sheet relationship context (for reduce step) ───────────────────
+    relationships_text = format_relationships_block(unified_schema) or ''
+
+    # ── MAP: one LLM call per chunk ──────────────────────────────────────────
+    partial_summaries: list = []
+
+    map_system = (
+        'You are a precise data analyst summarizing part of a multi-sheet workbook. '
+        'Only state facts that are directly visible in the sheet statistics shown. '
+        'Never invent figures, column names, or sheet names that are not present.'
+    )
+
+    for i, chunk_sheets in enumerate(chunks):
+        chunk_content = '\n\n'.join(sheet_blocks[s] for s in chunk_sheets)
+        sheet_label = ', '.join(f'"{s}"' for s in chunk_sheets)
+
+        map_prompt = (
+            f'User question: "{user_query}"\n\n'
+            f'You are analyzing sheet group {i + 1} of {len(chunks)} from "{doc_name}".\n\n'
+            f'Sheet data:\n{chunk_content}\n\n'
+            'Write a concise structured summary of what these sheets contain, what they track, '
+            'and any key figures visible in the statistics. '
+            'Use **bold** for key figures. Keep it under 4 short paragraphs. '
+            'State only what the data above directly shows.'
+        )
+
+        try:
+            resp = create_chat_completion(
+                [
+                    {'role': 'system', 'content': map_system},
+                    {'role': 'user', 'content': map_prompt},
+                ],
+                max_tokens=_MAP_MAX_TOKENS,
+                model_key=provider_key,
+            )
+            summary_text = resp.choices[0].message.content.strip()
+        except Exception:
+            summary_text = f'(Could not summarize this sheet group — data shown above.)'
+
+        partial_summaries.append({
+            'label': sheet_label,
+            'sheets': chunk_sheets,
+            'text': summary_text,
+        })
+
+    # ── REDUCE (hierarchical merging for large workbooks) ────────────────────
+    # For workbooks with ≤4 chunks a flat reduce is fine.  For larger ones,
+    # pair adjacent summaries and merge in layers so cross-chunk relationships
+    # aren't dropped at the single reduce boundary.
+    reduce_system = (
+        'You synthesize workbook analysis summaries. '
+        'Cite only figures and facts that appear in the partial summaries provided. '
+        'Never invent new numbers or sheet names.'
+    )
+
+    def _merge_pair(a: dict, b: dict, step_label: str) -> dict:
+        combined_label = f'{a["label"]} + {b["label"]}'
+        merge_prompt = (
+            f'Merge these two partial summaries into one cohesive summary.\n\n'
+            f'Part A ({a["label"]}):\n{a["text"]}\n\n'
+            f'Part B ({b["label"]}):\n{b["text"]}\n\n'
+            'Produce a single merged summary. Preserve all key figures from both parts. '
+            'Use **bold** for key figures. Keep it concise.'
+        )
+        try:
+            resp = create_chat_completion(
+                [
+                    {'role': 'system', 'content': reduce_system},
+                    {'role': 'user', 'content': merge_prompt},
+                ],
+                max_tokens=_MAP_MAX_TOKENS,
+                model_key=provider_key,
+            )
+            merged_text = resp.choices[0].message.content.strip()
+        except Exception:
+            merged_text = f'{a["text"]}\n\n{b["text"]}'
+        return {'label': combined_label, 'sheets': a['sheets'] + b['sheets'], 'text': merged_text}
+
+    summaries = list(partial_summaries)  # copy
+
+    if len(summaries) > 4:
+        # Hierarchical merging: pair and merge in layers
+        while len(summaries) > 4:
+            merged: list = []
+            for j in range(0, len(summaries) - 1, 2):
+                merged.append(_merge_pair(summaries[j], summaries[j + 1], f'layer-merge-{j}'))
+            if len(summaries) % 2 == 1:
+                merged.append(summaries[-1])  # carry odd one forward
+            summaries = merged
+
+    # Final reduce: one call that sees all remaining summaries + relationships
+    combined_text = '\n\n---\n\n'.join(
+        f'**{s["label"]}**\n\n{s["text"]}' for s in summaries
+    )
+
+    reduce_prompt = (
+        f'The following are structured summaries covering all {len(all_sheet_names)} sheets '
+        f'in "{doc_name}".\n\n'
+        f'User question: "{user_query}"\n\n'
+        f'{combined_text}'
+    )
+    if relationships_text:
+        reduce_prompt += f'\n\n{relationships_text}'
+    reduce_prompt += (
+        '\n\nWrite the final consolidated answer to the user\'s question. '
+        'Use ## headers for major sections, bullet points for details, **bold** for key figures. '
+        'Cover every sheet group. Mention cross-sheet relationships where they add context. '
+        'Cite only figures that appear in the summaries above — never invent new numbers. '
+        'End with a brief "## Key Takeaways" section.'
+    )
+
+    try:
+        reduce_resp = create_chat_completion(
+            [
+                {'role': 'system', 'content': reduce_system},
+                {'role': 'user', 'content': reduce_prompt},
+            ],
+            max_tokens=_REDUCE_MAX_TOKENS,
+            model_key=provider_key,
+        )
+        final_text = reduce_resp.choices[0].message.content.strip()
+    except Exception:
+        # Graceful degradation: return partial summaries directly
+        final_text = (
+            f'## Workbook Overview: {doc_name}\n\n'
+            + '\n\n'.join(f'**{s["label"]}**\n\n{s["text"]}' for s in partial_summaries)
+        )
+
+    chunk_note = f'{len(chunks)} chunk{"s" if len(chunks) != 1 else ""}, {len(all_sheet_names)} sheets'
+    return _agent_response(final_text, model=f'map-reduce ({chunk_note})')
+
+
+def _agent_response(text: str, model: str = 'model_a') -> dict:
+    """Shared response envelope for procure_agent and map-reduce."""
+    return {
+        'timestamp': int(datetime.utcnow().timestamp()),
+        'model': model,
+        'content': [{'type': 'text', 'text': text}],
+        'tool_calls': [],
+    }
+
+
+def _build_full_context(document_context: Optional[dict]) -> Optional[dict]:
+    """Return a copy of document_context where the active document's profile,
+    statistics, and unified_schema are swapped to their full (unscoped)
+    versions.  Used for multi-hop queries that must bypass active-sheet scoping
+    without re-reading the file or re-running the profiler."""
+    if not document_context:
+        return document_context
+    active = document_context.get('active_document')
+    if not active:
+        return document_context
+
+    full_active = {
+        **active,
+        'profile': active.get('full_profile') or active.get('profile'),
+        'statistics': active.get('full_statistics') or active.get('statistics'),
+        'unified_schema': active.get('full_unified_schema') or active.get('unified_schema'),
+    }
+    return {**document_context, 'active_document': full_active}
 
 
 def procure_agent(user_query: str, document_context: dict = None, session_state: dict = None, model_key: str = 'model_a', provider_key: str = 'auto') -> dict:
@@ -580,30 +873,38 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
 
     structural_answer = _try_answer_structural_question(user_query, document_context)
     if structural_answer:
-        return {
-            'timestamp': int(datetime.utcnow().timestamp()),
-            'model': 'deterministic',
-            'content': [{'type': 'text', 'text': structural_answer}],
-            'tool_calls': [],
-        }
+        return _agent_response(structural_answer, model='deterministic')
 
     refusal = _try_refuse_empty_document_request(user_query, document_context)
     if refusal:
-        return {
-            'timestamp': int(datetime.utcnow().timestamp()),
-            'model': 'deterministic',
-            'content': [{'type': 'text', 'text': refusal}],
-            'tool_calls': [],
-        }
+        return _agent_response(refusal, model='deterministic')
 
-    data_query_answer = _try_answer_data_query(user_query, document_context)
-    if data_query_answer:
-        return {
-            'timestamp': int(datetime.utcnow().timestamp()),
-            'model': 'deterministic-query-engine',
-            'content': [{'type': 'text', 'text': data_query_answer}],
-            'tool_calls': [],
-        }
+    # ── Phase 1a: Query-complexity routing (Pearl Pro) ───────────────────────
+    # Classify BEFORE data_query_answer so a "summarize the whole workbook" request
+    # goes directly to map-reduce, not through the spec engine (which can't cover 30
+    # sheets) or the scoped-LLM path (which would only see the active sheet).
+    from query_classifier import classify_query
+    active_sheet_raw = (
+        (document_context or {}).get('active_document', {}).get('active_sheet')
+        if document_context else None
+    )
+    query_type = classify_query(user_query, active_sheet_raw)
+
+    if query_type == 'summary':
+        # Phase 4 map-reduce — ignores active-sheet scope entirely
+        return _map_reduce_analysis(user_query, document_context, provider_key)
+
+    # For multi-hop queries bypass active-sheet scoping: swap in full-workbook
+    # profile/statistics/schema so the LLM can reason across all sheets.
+    if query_type == 'multi_hop':
+        document_context = _build_full_context(document_context)
+
+    data_query_result = _try_answer_data_query(user_query, document_context)
+    if isinstance(data_query_result, str):
+        return _agent_response(data_query_result, model='deterministic-query-engine')
+    # Sentinel: the query matched the data-query gate but execution failed.
+    # Carry this forward so the LLM prompt can be explicit about it (Phase 3).
+    query_engine_failed = isinstance(data_query_result, dict) and data_query_result.get('_engine_failed')
 
     system_prompt = load_system_prompt()
     messages = [
@@ -619,12 +920,34 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
         messages.append({'role': 'system', 'content': context_block})
 
     active_sheet = (document_context or {}).get('active_document', {}).get('active_sheet') if document_context else None
-    sheet_scope_note = (
-        f' The user is currently previewing sheet "{active_sheet}" — only that sheet\'s '
-        f'data is included in your context for this turn. If the user asks about data from '
-        f'a different sheet by name, tell them to switch to that sheet in the preview panel '
-        f'rather than answering from memory of a prior turn\'s different sheet.'
-    ) if active_sheet else ''
+
+    # For multi-hop we already expanded context — suppress the active-sheet note
+    # so the LLM doesn't think it's limited to one sheet.
+    if query_type == 'multi_hop':
+        sheet_scope_note = (
+            ' The user is asking a cross-sheet question. Full workbook context is provided — '
+            'answer using data from whichever sheets are relevant.'
+        )
+    else:
+        sheet_scope_note = (
+            f' The user is currently previewing sheet "{active_sheet}" — only that sheet\'s '
+            f'data is included in your context for this turn. If the user asks about data from '
+            f'a different sheet by name, tell them to switch to that sheet in the preview panel '
+            f'rather than answering from memory of a prior turn\'s different sheet.'
+        ) if active_sheet else ''
+
+    # Phase 3 honest-failure note: tell the LLM specifically that the query engine
+    # couldn't compute a direct answer, so it must be explicit about what it can and
+    # can't confirm from the context rather than silently guessing.
+    engine_failure_note = (
+        ' NOTE: The query engine attempted to compute a direct answer to this question '
+        'from the data but failed (likely because the column or sheet referenced is not '
+        'in the available schema). You MUST be explicit about what you can and cannot '
+        'confirm — state specifically what data is missing or ambiguous rather than '
+        'producing a plausible-sounding guess. If you cannot determine the answer '
+        'reliably from the context provided, say so directly and suggest how the user '
+        'could rephrase (e.g. by naming the exact column or sheet).'
+    ) if query_engine_failed else ''
 
     messages.append({
         'role': 'system',
@@ -647,6 +970,7 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
             'rather than re-adding values from the CSV sample yourself, since manual arithmetic over '
             'a text preview is exactly how past answers got the scale of a number wrong.'
             + sheet_scope_note
+            + engine_failure_note
         ),
     })
     messages.append({'role': 'user', 'content': user_query})

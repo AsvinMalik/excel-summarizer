@@ -15,17 +15,124 @@ from datetime import datetime
 from time import time
 
 
+def _looks_numeric_string(v) -> bool:
+    """True when v is a string that parses as a float — catches FX rates stored
+    as text (e.g. '1.23', '0.85') that fool a pure isinstance check."""
+    if not isinstance(v, str):
+        return False
+    try:
+        float(v.replace(',', '').strip())
+        return True
+    except (ValueError, AttributeError):
+        return False
+
+
+def _is_title_row(row_vals: list, n_total_cols: int) -> bool:
+    """Heuristic: True when a data row looks like a report-title or blank-separator
+    row rather than real column headers.
+
+    Title-row signals (any one is sufficient):
+    - Fewer than 2 non-null cells (very sparse — almost always decorative)
+    - A single dominant value fills >60% of the non-null cells (merged-cell title
+      forward-replicated, e.g. 'CONSOLIDATED REPORT 2024' across 70 columns)
+    """
+    non_null = [str(v).strip() for v in row_vals
+                if pd.notna(v) and str(v).strip() not in ('', 'nan')]
+    if len(non_null) < 2:
+        return True
+    unique = set(non_null)
+    if len(unique) <= 2:
+        dominant = max(unique, key=lambda x: non_null.count(x))
+        if non_null.count(dominant) / len(non_null) > 0.60:
+            return True
+    return False
+
+
+def _is_header_candidate(row_vals: list) -> bool:
+    """Heuristic: True when a row looks like real column headers.
+
+    Header-row signals (ALL must hold):
+    - ≥2 non-null cells
+    - ≥60% are strings (not booleans, not numeric, not numeric-looking strings)
+    - <15% are bare numeric values or numeric-looking strings  ← FX-rate guard
+    - Average string length <50 chars (column names are short; prose/titles aren't)
+    - No backtick characters (garbled encoding artifact)
+    """
+    non_null = [v for v in row_vals if pd.notna(v) and str(v).strip() not in ('', 'nan')]
+    if len(non_null) < 2:
+        return False
+
+    str_vals   = [v for v in non_null if isinstance(v, str) and not _looks_numeric_string(v)]
+    num_vals   = [v for v in non_null
+                  if (isinstance(v, (int, float)) and not isinstance(v, bool))
+                  or _looks_numeric_string(v)]
+
+    str_ratio = len(str_vals) / len(non_null)
+    num_ratio = len(num_vals) / len(non_null)
+    avg_len   = (sum(len(str(v)) for v in str_vals) / len(str_vals)) if str_vals else 0
+    has_garbled = any('`' in str(v) or str(v).startswith('=') for v in str_vals)
+
+    return (
+        str_ratio   > 0.60
+        and num_ratio < 0.15       # raised from 0.10 — FX rates are ~100% numeric
+        and avg_len   < 50
+        and not has_garbled
+    )
+
+
+def _promote_row_as_headers(df: pd.DataFrame, data_row_idx: int) -> pd.DataFrame:
+    """Promote df.iloc[data_row_idx] into column names, combining with any
+    non-Unnamed parent header already in df.columns (two-row header pattern)."""
+    candidate = df.iloc[data_row_idx]
+    new_cols: list = []
+    seen: dict = {}
+    for orig_col, sub_val in zip(df.columns, candidate):
+        parent = str(orig_col) if not str(orig_col).startswith('Unnamed') else ''
+        sub = str(sub_val).strip() if pd.notna(sub_val) and str(sub_val) != 'nan' else ''
+        if parent and sub and parent != sub:
+            name = f'{parent} - {sub}'
+        elif sub:
+            name = sub
+        elif parent:
+            name = parent
+        else:
+            name = f'Col_{len(new_cols)}'
+        if name in seen:
+            seen[name] += 1
+            name = f'{name}_{seen[name]}'
+        else:
+            seen[name] = 0
+        new_cols.append(name)
+    out = df.iloc[data_row_idx + 1:].reset_index(drop=True)
+    out.columns = new_cols
+    return out
+
+
 def _clean_sheet_headers(df: pd.DataFrame) -> pd.DataFrame:
     """Normalise Excel headers that pandas reads poorly.
 
-    Two common problems handled:
-    1. Merged top-row headers create 'Unnamed: N' continuation columns.
-       These are forward-filled with the parent name so 'Actual Q1' and three
-       'Unnamed' siblings become 'Actual Q1', 'Actual Q1_1', 'Actual Q1_2'.
-    2. Sheets with two header rows (a category row + a sub-column row) leave
-       the sub-header as the first data row.  Detected when >60% of the first
-       row values are short strings with <10% numeric values; those cells are
-       promoted to column names combined with the parent header above them.
+    Three classes of real-file corruption handled (all confirmed against the
+    reference MIS workbook 'MIS Automation PGIL.xlsx'):
+
+    1. Title/blank rows above the real header — a report-title merged cell
+       (e.g. 'CONSOLIDATED REPORT 2024' across 70 columns) or a blank
+       separator row sits above the true column-header row.  Pandas promotes
+       the title as df.columns and leaves the real headers in df.iloc[0].
+       Fix: scan the first data rows, skip confirmed title/blank rows, then
+       promote the first genuine header-candidate row.
+
+    2. FX-rate or numeric values in the candidate header row — values like
+       1.23 / 0.85 look like strings to isinstance() if stored as text but
+       are clearly data, not column names.  Fix: _is_header_candidate() treats
+       numeric-looking strings the same as bare floats when checking the
+       numeric ratio threshold (raised from 10% to 15%).
+
+    3. Merged-cell section headers forward-filled across many Unnamed columns —
+       a short section-header like 'Q1 Actuals' spanning 4 sub-columns is
+       legitimate and should be forward-filled (producing 'Q1 Actuals_1' etc.),
+       but a 50-char report title spanning 70 columns must NOT be forwarded
+       (it destroys the real sub-column names underneath).  Fix: only forward-
+       fill when the parent column name is ≤40 chars.
     """
     if df.empty or len(df.columns) == 0:
         return df
@@ -33,50 +140,54 @@ def _clean_sheet_headers(df: pd.DataFrame) -> pd.DataFrame:
     cols = list(df.columns)
     unnamed_count = sum(1 for c in cols if str(c).startswith('Unnamed:'))
 
-    # ── Case 1: two-row header (merged category + sub-columns) ──────────────
-    if unnamed_count / max(len(cols), 1) > 0.25 and len(df) >= 1:
-        first_row = df.iloc[0]
-        non_null = [v for v in first_row if pd.notna(v) and str(v).strip() not in ('', 'nan')]
-        if len(non_null) >= 2:
-            str_vals = [v for v in non_null if isinstance(v, str)]
-            num_vals = [v for v in non_null
-                        if isinstance(v, (int, float)) and not isinstance(v, bool)]
-            if (len(str_vals) / len(non_null) > 0.6
-                    and len(num_vals) / len(non_null) < 0.1):
-                # Promote first data row into column names
-                new_cols = []
-                seen: dict = {}
-                for orig_col, sub_val in zip(df.columns, first_row):
-                    parent = str(orig_col) if not str(orig_col).startswith('Unnamed') else ''
-                    sub = str(sub_val).strip() if pd.notna(sub_val) and str(sub_val) != 'nan' else ''
-                    if parent and sub and parent != sub:
-                        name = f'{parent} - {sub}'
-                    elif sub:
-                        name = sub
-                    elif parent:
-                        name = parent
-                    else:
-                        name = f'Col_{len(new_cols)}'
-                    # Deduplicate
-                    if name in seen:
-                        seen[name] += 1
-                        name = f'{name}_{seen[name]}'
-                    else:
-                        seen[name] = 0
-                    new_cols.append(name)
-                df = df.iloc[1:].reset_index(drop=True)
-                df.columns = new_cols
-                return df
+    # Only attempt header repair when pandas assigned many Unnamed columns —
+    # a clean sheet with real headers has at most a handful of Unnamed ones.
+    if unnamed_count / max(len(cols), 1) <= 0.25:
+        return df
 
-    # ── Case 2: single header row with Unnamed continuation columns ──────────
+    # ── Phase 1: scan the first data rows for the real header ────────────────
+    # Skip confirmed title/blank rows, stop as soon as we find a header candidate
+    # or a data row (fail closed — leave as-is rather than corrupt the frame).
+    MAX_SCAN = 5  # never look more than 5 rows deep (avoids eating real data)
+    rows_to_skip = 0
+
+    for scan_idx in range(min(MAX_SCAN, len(df))):
+        row_list = list(df.iloc[scan_idx])
+
+        if _is_title_row(row_list, len(cols)):
+            # Confirmed title/blank — skip it and keep scanning
+            rows_to_skip = scan_idx + 1
+            continue
+
+        if _is_header_candidate(row_list):
+            # This row looks like real column headers — promote it
+            if scan_idx > 0 or rows_to_skip > 0:
+                df = df.iloc[rows_to_skip:].reset_index(drop=True)
+                # Re-index scan_idx relative to the trimmed frame
+                promote_at = scan_idx - rows_to_skip
+                return _promote_row_as_headers(df, promote_at)
+            else:
+                # scan_idx == 0: first data row IS the real header (standard two-row case)
+                return _promote_row_as_headers(df, 0)
+
+        # Row looks like data (numeric, long strings, non-header) — stop scanning.
+        # We've gone as far as we safely can without eating real data rows.
+        break
+
+    # ── Phase 2: fall through — the current df.columns are the best we have.
+    # Forward-fill Unnamed continuation columns produced by merged section-header
+    # cells, but ONLY when the named parent is short enough to be a real section
+    # label (≤40 chars).  Long strings are report titles; forward-filling them
+    # would destroy the real sub-column names that follow them.
     result_cols = list(df.columns)
     last_named = ''
     named_count: dict = {}
     for i, c in enumerate(result_cols):
         if str(c).startswith('Unnamed:'):
-            if last_named:
+            if last_named and len(last_named) <= 40:
                 named_count[last_named] = named_count.get(last_named, 0) + 1
                 result_cols[i] = f'{last_named}_{named_count[last_named]}'
+            # else: parent is a long title — leave as Unnamed:N (fail closed)
         else:
             last_named = str(c)
     df.columns = result_cols
@@ -319,6 +430,13 @@ def _enrich_doc(doc: dict) -> dict:
         'schema_context': schema_context,
         'validation': validation,
         'statistics': statistics,
+        # Full (unscoped) versions — always the whole-workbook data, never narrowed
+        # by active_sheet.  Used by Phase 4 map-reduce and multi-hop routing so that
+        # whole-workbook requests bypass active-sheet scoping without re-reading the
+        # file or re-running the profiler.
+        'full_profile': stored.get('profile'),
+        'full_statistics': stored.get('statistics'),
+        'full_unified_schema': stored.get('unified_schema'),
         # Server-local path, never echoed back in any API response — used internally so
         # the query engine can re-read the FULL workbook on demand instead of operating
         # on the (possibly truncated) text preview.
