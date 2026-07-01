@@ -335,6 +335,7 @@ async def chat(request: ConversationMessage):
         "response": response["content"],
         "tool_calls": response.get("tool_calls", []),
         "timestamp": response.get("timestamp"),
+        "model": response.get("model"),
     })
 
 @app.get("/api/documents")
