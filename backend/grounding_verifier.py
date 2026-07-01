@@ -127,3 +127,38 @@ def find_unverifiable_numbers(text: str, known_values: set, min_value: float = 1
         if not any(abs(value - k) <= tolerance for k in known_values):
             unverifiable.append(value)
     return unverifiable
+
+
+# Phase 3: qualitative grounding ─────────────────────────────────────────────
+# Proper nouns in Title Case inside quotes are a reliable hallucination signal —
+# the LLM tends to invent named entities and put them in quotation marks.
+# Only matches multi-word names (≥ 2 Title-Case words) to avoid false positives
+# on generic phrases like "Project A" or single common words like "India".
+_PROPER_NOUN_RE = re.compile(
+    r'"([A-Z][a-z]{1,20}(?:\s+[A-Z][a-z]{1,20}){1,5})"'
+)
+
+
+def find_unverifiable_entities(answer_text: str, data_preview: str) -> list:
+    """Return quoted proper-noun entities from answer_text that don't appear in
+    the data preview.  These are candidates for hallucinated names.
+
+    Only multi-word Title-Case names are checked (e.g. "Tata Steel Limited",
+    "Rajesh Kumar") — single words are too ambiguous and single-letter
+    abbreviations are excluded entirely.  The check is case-insensitive.
+    """
+    if not data_preview or not answer_text:
+        return []
+    preview_lower = data_preview.lower()
+    hallucinated = []
+    for match in _PROPER_NOUN_RE.finditer(answer_text):
+        entity = match.group(1)
+        # Skip if any word in the entity is a common English word (not a proper name)
+        _COMMON = {'the', 'and', 'for', 'with', 'not', 'are', 'has', 'but', 'from',
+                   'this', 'that', 'they', 'have', 'will', 'been', 'were', 'each', 'its'}
+        words = entity.lower().split()
+        if any(w in _COMMON for w in words):
+            continue
+        if entity.lower() not in preview_lower:
+            hallucinated.append(entity)
+    return hallucinated

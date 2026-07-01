@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ai_orchestrator import create_chat_completion
 from data_profiler import format_profile_block, format_breakdowns_block
 from query_engine import load_all_sheets, execute_query_spec
-from grounding_verifier import collect_known_numeric_values, find_unverifiable_numbers
+from grounding_verifier import collect_known_numeric_values, find_unverifiable_numbers, find_unverifiable_entities
 from sheet_orchestrator import format_relationships_block
 from schema_mapper import format_schema_context_block
 from data_validator import format_validation_block
@@ -918,8 +918,25 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
     if isinstance(data_query_result, str):
         return _agent_response(data_query_result, model='deterministic-query-engine')
     # Sentinel: the query matched the data-query gate but execution failed.
-    # Carry this forward so the LLM prompt can be explicit about it (Phase 3).
     query_engine_failed = isinstance(data_query_result, dict) and data_query_result.get('_engine_failed')
+
+    # Phase 5a: when the spec engine explicitly failed (not just "not a data query"),
+    # try Model B (pandas sandbox) automatically before falling to the prose LLM.
+    # Model B generates custom Python code, so it can handle queries the fixed spec
+    # vocabulary cannot (complex aggregations, reshaping, ad-hoc filters).
+    # If Model B also fails we fall through to prose with a combined failure note.
+    model_b_fallback_failed = False
+    if query_engine_failed:
+        try:
+            from model_b_agent import model_b_agent as _model_b
+            mb_result = _model_b(user_query, document_context, session_state, provider_key=provider_key)
+            # Model B returns a dict; only propagate if it produced a real answer
+            mb_text = (mb_result or {}).get('answer', '')
+            if mb_text and not mb_text.startswith('[Model B error') and 'failed' not in mb_text[:80].lower():
+                return {**mb_result, 'model': 'model-b-auto-fallback'}
+            model_b_fallback_failed = True
+        except Exception:
+            model_b_fallback_failed = True
 
     system_prompt = load_system_prompt()
     messages = [
@@ -951,18 +968,31 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
             f'rather than answering from memory of a prior turn\'s different sheet.'
         ) if active_sheet else ''
 
-    # Phase 3 honest-failure note: tell the LLM specifically that the query engine
-    # couldn't compute a direct answer, so it must be explicit about what it can and
-    # can't confirm from the context rather than silently guessing.
-    engine_failure_note = (
-        ' NOTE: The query engine attempted to compute a direct answer to this question '
-        'from the data but failed (likely because the column or sheet referenced is not '
-        'in the available schema). You MUST be explicit about what you can and cannot '
-        'confirm — state specifically what data is missing or ambiguous rather than '
-        'producing a plausible-sounding guess. If you cannot determine the answer '
-        'reliably from the context provided, say so directly and suggest how the user '
-        'could rephrase (e.g. by naming the exact column or sheet).'
-    ) if query_engine_failed else ''
+    # Phase 3 / 5a honest-failure note: tell the LLM when both the spec engine and
+    # the Model B sandbox failed, so it must be explicit rather than silently guessing.
+    if query_engine_failed and model_b_fallback_failed:
+        engine_failure_note = (
+            ' NOTE: Both the deterministic query engine and the code-execution sandbox '
+            'attempted to compute a direct answer to this question but failed (likely '
+            'because the column or sheet referenced is not in the available schema). '
+            'You MUST be explicit about what you can and cannot confirm — state '
+            'specifically what data is missing or ambiguous rather than producing a '
+            'plausible-sounding guess. If you cannot determine the answer reliably from '
+            'the context provided, say so directly and suggest how the user could '
+            'rephrase (e.g. by naming the exact column or sheet).'
+        )
+    elif query_engine_failed:
+        engine_failure_note = (
+            ' NOTE: The query engine attempted to compute a direct answer to this question '
+            'from the data but failed (likely because the column or sheet referenced is not '
+            'in the available schema). You MUST be explicit about what you can and cannot '
+            'confirm — state specifically what data is missing or ambiguous rather than '
+            'producing a plausible-sounding guess. If you cannot determine the answer '
+            'reliably from the context provided, say so directly and suggest how the user '
+            'could rephrase (e.g. by naming the exact column or sheet).'
+        )
+    else:
+        engine_failure_note = ''
 
     messages.append({
         'role': 'system',
@@ -1034,6 +1064,31 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
                     'Try asking for a specific total, average, or ranking instead (e.g. "total spend", "top '
                     '5 vendors by spend") — those are computed directly from your data and always exact.'
                 )
+
+    # Phase 3: qualitative entity grounding — check for hallucinated proper nouns.
+    # Applies only to qualitative (narrative) answers since numeric grounding already
+    # covers exact-figure queries. Only triggers a correction if ≥ 2 quoted proper
+    # names don't appear in the data preview, avoiding false positives from
+    # incidental capitalization in otherwise correct prose.
+    if is_qualitative:
+        data_preview = (
+            ((document_context or {}).get('active_document') or {}).get('data_preview') or ''
+        )
+        unverifiable_entities = find_unverifiable_entities(text, data_preview)
+        if len(unverifiable_entities) >= 2:
+            entity_list = ', '.join(f'"{e}"' for e in unverifiable_entities[:4])
+            correction_messages = messages + [
+                {'role': 'assistant', 'content': text},
+                {'role': 'user', 'content': (
+                    f'Your previous answer mentioned these names/entities: {entity_list}. '
+                    'None of them appear in the document data I provided. Please rewrite your '
+                    'answer using ONLY names, project identifiers, and entities that actually '
+                    'appear in the data context above. If you cannot find a specific name in the '
+                    'data, describe the concept without inventing an example name.'
+                )},
+            ]
+            correction_resp = create_chat_completion(correction_messages, max_tokens=1200, model_key=provider_key)
+            text = correction_resp.choices[0].message.content
 
     return {
         'timestamp': response.created,

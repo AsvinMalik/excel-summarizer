@@ -8,6 +8,70 @@ engine and LLM context always know which sheets can be joined and how.
 import re
 import pandas as pd
 
+# Phase 2c: synonym groups for semantic column-name matching.
+# Each group is a frozenset of interchangeable terms. When every token in one
+# column name has a synonym-equivalent token in another, we treat them as
+# candidate join keys and verify with value overlap.
+_SYNONYM_GROUPS: list = [
+    # entity types
+    frozenset({'vendor', 'supplier', 'provider', 'contractor', 'seller'}),
+    frozenset({'customer', 'client', 'buyer', 'account', 'consumer'}),
+    frozenset({'employee', 'staff', 'worker', 'personnel', 'member'}),
+    frozenset({'product', 'item', 'sku', 'goods', 'material', 'article'}),
+    frozenset({'order', 'purchase', 'transaction', 'requisition', 'po'}),
+    frozenset({'invoice', 'bill', 'receipt', 'voucher'}),
+    frozenset({'department', 'dept', 'division', 'unit', 'team', 'section'}),
+    frozenset({'project', 'programme', 'program', 'initiative', 'scheme'}),
+    # attribute qualifiers
+    frozenset({'id', 'code', 'no', 'num', 'number', 'key', 'ref', 'reference', 'cd'}),
+    frozenset({'name', 'title', 'desc', 'description', 'label', 'nm'}),
+    frozenset({'amount', 'amt', 'value', 'total', 'sum', 'val', 'cost', 'price'}),
+    frozenset({'quantity', 'qty', 'count', 'units', 'volume', 'vol'}),
+    frozenset({'date', 'dt', 'time', 'period', 'month', 'year', 'day'}),
+    frozenset({'category', 'cat', 'type', 'class', 'group', 'segment', 'kind'}),
+    frozenset({'region', 'area', 'zone', 'territory', 'location', 'loc', 'place'}),
+    frozenset({'status', 'state', 'flag', 'indicator', 'stage', 'phase'}),
+]
+
+# Build a fast lookup: token -> frozenset index so _are_synonyms is O(1)
+_TOKEN_TO_GROUP: dict = {}
+for _gi, _grp in enumerate(_SYNONYM_GROUPS):
+    for _tok in _grp:
+        _TOKEN_TO_GROUP[_tok] = _gi
+
+
+def _are_synonyms(a: str, b: str) -> bool:
+    """True when two tokens belong to the same synonym group."""
+    if a == b:
+        return True
+    ga = _TOKEN_TO_GROUP.get(a)
+    return ga is not None and ga == _TOKEN_TO_GROUP.get(b)
+
+
+def _col_tokens(col_name: str) -> list:
+    """Split a column name into lowercase word tokens, dropping empties."""
+    return [t for t in re.split(r'[\s_\-/]+', col_name.strip().lower()) if t]
+
+
+def _semantic_similarity(tokens_a: list, tokens_b: list) -> float:
+    """Jaccard-style score [0, 1] counting synonym-matched tokens as equal.
+
+    Each token in A is matched to at most one token in B (and vice versa).
+    Score = matched_count / union_size.
+    """
+    if not tokens_a or not tokens_b:
+        return 0.0
+    matched_b = [False] * len(tokens_b)
+    matches = 0
+    for ta in tokens_a:
+        for j, tb in enumerate(tokens_b):
+            if not matched_b[j] and _are_synonyms(ta, tb):
+                matched_b[j] = True
+                matches += 1
+                break
+    union = len(tokens_a) + len(tokens_b) - matches
+    return matches / union if union else 0.0
+
 
 def _normalize_col_key(col_name: str) -> str:
     """Lowercase + collapse whitespace/underscores/hyphens for fuzzy name matching."""
@@ -113,6 +177,85 @@ def detect_relationships(all_sheets: dict) -> list:
                     'overlap_pct': round(overlap_pct, 1),
                     'confidence': confidence,
                     'type': cardinality,
+                    'match_type': 'exact',
+                })
+
+    # Phase 2c: semantic/fuzzy pass — detect relationships where column names use
+    # different but synonymous terminology (e.g. "Vendor_ID" vs "Supplier Code").
+    # Only runs for sheet pairs that have no relationship from the exact-match pass.
+    sheet_names = list(all_sheets.keys())
+    paired_sheets = {
+        (min(r['from_sheet'], r['to_sheet']), max(r['from_sheet'], r['to_sheet']))
+        for r in relationships
+    }
+    for i, sheet1 in enumerate(sheet_names):
+        for sheet2 in sheet_names[i + 1:]:
+            if (min(sheet1, sheet2), max(sheet1, sheet2)) in paired_sheets:
+                continue  # already related via exact match
+            df1, df2 = all_sheets[sheet1], all_sheets[sheet2]
+            for col1 in df1.columns:
+                tokens1 = _col_tokens(col1)
+                best_score, best_col2 = 0.0, None
+                for col2 in df2.columns:
+                    sim = _semantic_similarity(tokens1, _col_tokens(col2))
+                    if sim > best_score:
+                        best_score, best_col2 = sim, col2
+                # Similarity threshold: require ≥ 0.6 so single-token columns like
+                # "Code" don't spuriously match every "code"-containing column.
+                if best_score < 0.6 or best_col2 is None:
+                    continue
+                # Deduplicate against exact-pass seen_pairs
+                pair_key = (
+                    min(sheet1, sheet2), min(col1, best_col2),
+                    max(sheet1, sheet2), max(col1, best_col2),
+                )
+                if pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
+
+                s1 = df1[col1].dropna()
+                s2 = df2[best_col2].dropna()
+                if len(s1) == 0 or len(s2) == 0:
+                    continue
+
+                def _norm_vals_fuzzy(series: pd.Series) -> set:
+                    if pd.api.types.is_numeric_dtype(series):
+                        return set(round(float(v), 6) for v in series)
+                    return set(series.astype(str).str.strip().str.lower())
+
+                v1 = _norm_vals_fuzzy(s1)
+                v2 = _norm_vals_fuzzy(s2)
+                overlap = len(v1 & v2)
+                total = min(len(v1), len(v2))
+                if total == 0 or overlap / total < 0.6:
+                    continue
+                overlap_pct = overlap / total * 100
+
+                uniq1 = len(v1) / max(len(s1), 1)
+                uniq2 = len(v2) / max(len(s2), 1)
+                if uniq1 >= 0.95 and uniq2 < 0.95:
+                    parent_sheet, parent_col, child_sheet, child_col = sheet1, col1, sheet2, best_col2
+                    cardinality = '1:N'
+                elif uniq2 >= 0.95 and uniq1 < 0.95:
+                    parent_sheet, parent_col, child_sheet, child_col = sheet2, best_col2, sheet1, col1
+                    cardinality = '1:N'
+                else:
+                    if len(v1) <= len(v2):
+                        parent_sheet, parent_col, child_sheet, child_col = sheet1, col1, sheet2, best_col2
+                    else:
+                        parent_sheet, parent_col, child_sheet, child_col = sheet2, best_col2, sheet1, col1
+                    cardinality = '1:1' if (uniq1 >= 0.95 and uniq2 >= 0.95) else 'N:M'
+
+                confidence = round(min(0.65, best_score * 0.7), 2)
+                relationships.append({
+                    'from_sheet': parent_sheet,
+                    'from_col': parent_col,
+                    'to_sheet': child_sheet,
+                    'to_col': child_col,
+                    'overlap_pct': round(overlap_pct, 1),
+                    'confidence': confidence,
+                    'type': cardinality,
+                    'match_type': 'semantic',
                 })
 
     relationships.sort(key=lambda r: -r['confidence'])
