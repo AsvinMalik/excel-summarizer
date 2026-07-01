@@ -585,58 +585,9 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
           <div ref={messagesEnd} />
         </div>
 
-        <div className="border-t border-gray-200 bg-white p-6">
-          {/* Model selector */}
-          <div className="flex flex-col gap-2 mb-4">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-medium text-gray-500 w-16 shrink-0">Pipeline:</span>
-              <div className="flex gap-1 flex-wrap">
-                {MODEL_OPTIONS.map((m) => (
-                  <button
-                    key={m.value}
-                    type="button"
-                    title={m.desc}
-                    onClick={() => handleModelSelect(m.value)}
-                    className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${
-                      selectedModel === m.value
-                        ? 'bg-blue-600 text-white border-blue-600 shadow'
-                        : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400 hover:text-blue-600'
-                    }`}
-                  >
-                    {m.label}
-                  </button>
-                ))}
-              </div>
-              <span className="text-xs text-gray-400 hidden sm:block">
-                {MODEL_OPTIONS.find(m => m.value === selectedModel)?.desc}
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-medium text-gray-500 w-16 shrink-0">API:</span>
-              <div className="flex gap-1 flex-wrap">
-                {PROVIDER_OPTIONS.map((p) => (
-                  <button
-                    key={p.value}
-                    type="button"
-                    title={p.desc}
-                    onClick={() => handleProviderSelect(p.value)}
-                    className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${
-                      selectedProvider === p.value
-                        ? 'bg-indigo-600 text-white border-indigo-600 shadow'
-                        : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'
-                    }`}
-                  >
-                    {p.label}
-                  </button>
-                ))}
-              </div>
-              <span className="text-xs text-gray-400 hidden sm:block">
-                {PROVIDER_OPTIONS.find(p => p.value === selectedProvider)?.desc}
-              </span>
-            </div>
-          </div>
+        <div className="border-t border-gray-200 bg-white px-6 pt-4 pb-3">
           <QuickActions />
-          <div className="flex gap-3">
+          <div className="flex gap-3 mb-3">
             <input
               type="text"
               value={input}
@@ -653,7 +604,47 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
               <Send size={18} />
             </button>
           </div>
-          <p className="text-xs text-gray-500 mt-3">💡 Tip: Try asking "Summarize Acme contract" or "Which vendors expire next month?"</p>
+
+          {/* Pipeline + API selectors — below the input, compact */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] font-medium text-gray-400 uppercase tracking-wide">Pipeline</span>
+              {MODEL_OPTIONS.map((m) => (
+                <button
+                  key={m.value}
+                  type="button"
+                  title={m.desc}
+                  onClick={() => handleModelSelect(m.value)}
+                  className={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold border transition-all ${
+                    selectedModel === m.value
+                      ? 'bg-blue-600 text-white border-blue-600'
+                      : 'bg-white text-gray-500 border-gray-300 hover:border-blue-400 hover:text-blue-600'
+                  }`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            <div className="w-px h-4 bg-gray-200 hidden sm:block" />
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] font-medium text-gray-400 uppercase tracking-wide">API</span>
+              {PROVIDER_OPTIONS.map((p) => (
+                <button
+                  key={p.value}
+                  type="button"
+                  title={p.desc}
+                  onClick={() => handleProviderSelect(p.value)}
+                  className={`px-2.5 py-0.5 rounded-full text-[11px] font-semibold border transition-all ${
+                    selectedProvider === p.value
+                      ? 'bg-indigo-600 text-white border-indigo-600'
+                      : 'bg-white text-gray-500 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </div>
