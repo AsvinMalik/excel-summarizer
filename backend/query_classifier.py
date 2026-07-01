@@ -30,8 +30,6 @@ _SUMMARY_RE = re.compile(
     r'|overview'
     r'|whole\s+(?:workbook|file|document|spreadsheet)'
     r'|entire\s+(?:workbook|file|document|spreadsheet)'
-    r'|all\s+(?:the\s+)?(?:sheet|tab)s?'
-    r'|every\s+(?:sheet|tab)'
     r'|full\s+(?:workbook|report|analysis|breakdown)'
     r'|complete\s+(?:overview|summary|report|analysis)'
     r'|executive\s+(?:summary|overview)'
@@ -53,6 +51,8 @@ _MULTI_HOP_RE = re.compile(
     r'\b('
     r'across\s+(?:all\s+)?(?:sheet|tab)s?'
     r'|across\s+the\s+workbook'
+    r'|all\s+(?:the\s+)?(?:sheet|tab)s?'     # "all sheets/tabs" without a summary verb
+    r'|every\s+(?:sheet|tab)'
     r'|between\s+(?:sheet|tab)s?'
     r'|compare\s+(?:sheet|tab)s?'
     r'|in\s+(?:other|another|different)\s+(?:sheet|tab)'
