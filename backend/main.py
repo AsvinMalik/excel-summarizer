@@ -40,6 +40,8 @@ from pdf_report import build_insights_pdf, build_rfq_pdf
 from data_profiler import profile_workbook
 from sheet_orchestrator import detect_relationships, classify_sheet_roles, build_unified_schema
 from schema_mapper import build_schema_context
+from data_validator import validate_workbook
+from statistical_analyzer import analyze_workbook
 
 app = FastAPI(title="Procure.ai Backend")
 
@@ -142,6 +144,8 @@ def _enrich_doc(doc: dict) -> dict:
         'profile': stored.get('profile'),
         'unified_schema': stored.get('unified_schema'),
         'schema_context': stored.get('schema_context'),
+        'validation': stored.get('validation'),
+        'statistics': stored.get('statistics'),
         # Server-local path, never echoed back in any API response — used internally so
         # the query engine can re-read the FULL workbook on demand instead of operating
         # on the (possibly truncated) text preview.
@@ -417,6 +421,11 @@ def queue_document_processing(doc_id: str, file_path: str, file_type: str, compa
             schema_context = build_schema_context(all_sheets, profile, relationships)
             DOCUMENT_STORE[doc_id]["unified_schema"] = unified_schema
             DOCUMENT_STORE[doc_id]["schema_context"] = schema_context
+
+            # Data quality validation and statistical analysis — both computed
+            # once at upload and injected into LLM context on every request.
+            DOCUMENT_STORE[doc_id]["validation"] = validate_workbook(all_sheets, profile)
+            DOCUMENT_STORE[doc_id]["statistics"] = analyze_workbook(all_sheets, profile)
 
             DOCUMENT_STORE[doc_id]["status"] = "ready"
             TASK_STORE[task_id]["status"] = "completed"

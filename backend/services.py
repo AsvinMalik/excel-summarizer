@@ -12,6 +12,8 @@ from query_engine import load_all_sheets, execute_query_spec
 from grounding_verifier import collect_known_numeric_values, find_unverifiable_numbers
 from sheet_orchestrator import format_relationships_block
 from schema_mapper import format_schema_context_block
+from data_validator import format_validation_block
+from statistical_analyzer import format_statistics_block
 
 BASE_PROMPT_PATH = os.path.join(os.path.dirname(__file__), '..', 'agent_system_prompt.txt')
 
@@ -70,15 +72,19 @@ def build_document_context_block(document_context: dict = None) -> str:
 
         schema_context_text = format_schema_context_block(doc.get('schema_context'))
         if schema_context_text:
-            context_block += (
-                "  " + schema_context_text.replace("\n", "\n  ") + "\n"
-            )
+            context_block += "  " + schema_context_text.replace("\n", "\n  ") + "\n"
 
         relationships_text = format_relationships_block(doc.get('unified_schema'))
         if relationships_text:
-            context_block += (
-                "  " + relationships_text.replace("\n", "\n  ") + "\n"
-            )
+            context_block += "  " + relationships_text.replace("\n", "\n  ") + "\n"
+
+        validation_text = format_validation_block(doc.get('validation'))
+        if validation_text:
+            context_block += "  " + validation_text.replace("\n", "\n  ") + "\n"
+
+        statistics_text = format_statistics_block(doc.get('statistics'))
+        if statistics_text:
+            context_block += "  " + statistics_text.replace("\n", "\n  ") + "\n"
 
     return context_block
 

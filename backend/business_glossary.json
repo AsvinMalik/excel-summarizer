@@ -1,0 +1,68 @@
+{
+  "spending_columns": [
+    "spend", "cost", "price", "amount", "amt", "revenue", "salary", "wage",
+    "budget", "expense", "exp", "value", "val", "total", "payment", "pay",
+    "fee", "charge", "invoice", "po amount", "contract value", "annual spend",
+    "monthly spend", "spend ytd", "estimated cost", "unit cost", "line total",
+    "subtotal", "gross", "net", "outlay", "disbursement", "expenditure"
+  ],
+  "date_columns": [
+    "date", "dt", "time", "period", "expiry", "expiration", "expir", "due",
+    "deadline", "renewal", "start", "end", "created", "updated", "modified",
+    "issued", "received", "closed", "signed", "effective", "termination",
+    "invoice date", "contract date", "po date", "order date"
+  ],
+  "vendor_identifiers": [
+    "vendor", "supplier", "contractor", "provider", "partner", "seller",
+    "merchant", "company", "firm", "agency", "manufacturer", "distributor",
+    "vendor name", "supplier name", "vendor id", "supplier id", "supplier code",
+    "vendor code", "counterparty", "third party", "third-party"
+  ],
+  "region_columns": [
+    "region", "geography", "geo", "territory", "area", "zone", "location",
+    "country", "market", "district", "branch", "division", "business unit",
+    "bu", "site", "office", "apac", "emea", "americas", "latam", "amer",
+    "asia", "europe", "pacific"
+  ],
+  "risk_indicators": [
+    "risk", "score", "rating", "grade", "level", "compliance", "penalty",
+    "delay", "late", "overdue", "flag", "issue", "breach", "violation",
+    "on-time", "on time", "sla", "kpi", "performance", "audit", "defect",
+    "return rate", "error rate", "rejection"
+  ],
+  "status_columns": [
+    "status", "state", "stage", "phase", "condition", "type", "category",
+    "class", "tier", "priority", "flag", "label", "tag", "active", "inactive"
+  ],
+  "quantity_columns": [
+    "quantity", "qty", "count", "units", "volume", "hours", "days", "items",
+    "pieces", "pcs", "no.", "number of", "headcount", "seats", "licenses",
+    "orders", "transactions", "invoices"
+  ],
+  "id_columns": [
+    "id", "code", "number", "num", "no", "ref", "reference", "key",
+    "identifier", "serial", "seq", "sequence", "po number", "po no",
+    "invoice no", "order no", "contract no", "sku", "part no"
+  ],
+  "canonical_labels": {
+    "amt": "Amount",
+    "val": "Value",
+    "exp": "Expense",
+    "qty": "Quantity",
+    "pcs": "Pieces",
+    "dt": "Date",
+    "no": "Number",
+    "num": "Number",
+    "ref": "Reference",
+    "bu": "Business Unit",
+    "geo": "Geography",
+    "po": "Purchase Order",
+    "ytd": "Year-to-Date",
+    "mtd": "Month-to-Date",
+    "pct": "Percentage",
+    "avg": "Average",
+    "max": "Maximum",
+    "min": "Minimum",
+    "stdev": "Std Deviation"
+  }
+}
