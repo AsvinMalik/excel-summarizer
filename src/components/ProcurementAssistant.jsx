@@ -446,7 +446,8 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
   );
 
   const MODEL_BADGE = {
-    MODEL_B:      { label: 'Model B · Sandbox', color: 'bg-violet-100 text-violet-700' },
+    MODEL_B:           { label: 'Model B · Sandbox',  color: 'bg-violet-100 text-violet-700' },
+    model_b_redirect:  { label: 'Model B → Model A',  color: 'bg-amber-100 text-amber-700' },
     PHI3_LOCAL:   { label: 'Phi3 · Local',      color: 'bg-emerald-100 text-emerald-700' },
     GROQ:         { label: 'Groq · Llama 3.3',  color: 'bg-purple-100 text-purple-700' },
     CEREBRAS:     { label: 'Cerebras',           color: 'bg-orange-100 text-orange-700' },

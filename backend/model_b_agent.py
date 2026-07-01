@@ -18,7 +18,6 @@ No grounding verifier is needed — the code execution IS the ground truth.
 import json
 import re
 import threading
-import time
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -136,7 +135,7 @@ def _format_result(value: Any) -> str:
 
     if isinstance(value, pd.DataFrame):
         if value.empty:
-            return '*The query returned an empty table — no matching rows.*'
+            return 'No matching rows.'
         rows = value.head(50)
         header = '| ' + ' | '.join(str(c) for c in rows.columns) + ' |'
         sep = '|' + '---|' * len(rows.columns)
@@ -144,22 +143,13 @@ def _format_result(value: Any) -> str:
             '| ' + ' | '.join(str(v) for v in row) + ' |'
             for row in rows.itertuples(index=False)
         )
-        note = (
-            f'\n\n*Showing {len(rows)} of {len(value)} rows — '
-            'computed by Model B sandbox directly from your data.*'
-        )
-        return f'{header}\n{sep}\n{body}{note}'
+        suffix = f'\n\n*Showing {len(rows)} of {len(value)} rows.*' if len(value) > len(rows) else ''
+        return f'{header}\n{sep}\n{body}{suffix}'
 
     if isinstance(value, (int, float)):
-        return (
-            f'**Result:** {value:,.4g}\n\n'
-            '*Computed by Model B sandbox directly from your data.*'
-        )
+        return f'**{value:,.4g}**'
 
-    return (
-        f'{value}\n\n'
-        '*Computed by Model B sandbox directly from your data.*'
-    )
+    return str(value)
 
 
 # ---------------------------------------------------------------------------
@@ -188,27 +178,16 @@ def model_b_agent(
     if refusal:
         return _wrap('deterministic', refusal)
 
-    # Model B is a pandas code-execution sandbox — it answers precise data queries
-    # (totals, rankings, filters, counts). Purely narrative tasks ("summarize sheet by
-    # sheet", "explain the contract", "write a report") can't be answered by pandas code.
-    # Detect and redirect immediately. Note: "analyze" and "what is X" are kept out of
-    # this pattern — "analyze total spend" and "what is the average price" are valid data
-    # queries Model B can handle perfectly well.
+    # Block only tasks that are inherently narrative — generating prose, writing reports,
+    # extracting contract text. Everything else (rankings, filters, totals, "give me a
+    # brief count", "overview of spend by region") can produce a real pandas result.
     _NARRATIVE_RE = re.compile(
-        r'\b(summar|overview|explain|introduc|tell\s+me\s+about|'
-        r'highlight|outline|brief|report\s+on|write\s+a\s+report|build\s+(a\s+)?report|'
-        r'key\s+(point|finding|trend|takeaway)|extract\s+clause|generate\s+rfq)\b',
+        r'\b(summar\w*|write\s+a\s+(report|summary)|build\s+(a\s+)?report|'
+        r'report\s+on|extract\s+clause|generate\s+rfq|tell\s+me\s+about)\b',
         re.IGNORECASE,
     )
     if _NARRATIVE_RE.search(user_query):
-        return _wrap('MODEL_B', (
-            '**Model B is a pandas sandbox** — it answers precise data queries by '
-            'generating and running Python code on your data (e.g. totals, rankings, '
-            'filters, counts).\n\n'
-            'This question asks for a **narrative summary or analysis**, which needs '
-            'language reasoning, not code execution. '
-            'Switch to **Model A** for summaries, reports, and clause extraction.'
-        ))
+        return _wrap('model_b_redirect', 'Ask **Model A** for this.')
 
     # Find the active document with a real file path
     documents = (document_context or {}).get('documents') or []
@@ -218,16 +197,13 @@ def model_b_agent(
         if d and d.get('file_path')
     ]
     if not candidates:
-        return _wrap('MODEL_B', (
-            'No spreadsheet is loaded yet for Model B to analyze. '
-            'Upload an Excel file first, then ask your question.'
-        ))
+        return _wrap('model_b_redirect', 'Upload a spreadsheet first.')
 
     doc = candidates[0]
     try:
         all_sheets = load_all_sheets(doc['file_path'])
-    except Exception as exc:
-        return _wrap('MODEL_B', f'Could not read the data file: {exc}')
+    except Exception:
+        return _wrap('model_b_redirect', 'Could not read file — ask **Model A**.')
 
     # If the user has a specific sheet selected in the preview panel, scope the code
     # generation to that sheet only — simpler prompt, more reliable code.
@@ -263,7 +239,6 @@ def model_b_agent(
         'Return ONLY valid Python code — no markdown fences, no explanation.'
     )
 
-    t0 = time.monotonic()
     code_resp = create_chat_completion(
         [
             {'role': 'system', 'content': (
@@ -300,13 +275,7 @@ def model_b_agent(
         out = _run_sandbox(fixed_code, all_sheets)
 
         if out.get('error'):
-            elapsed = round((time.monotonic() - t0) * 1000)
-            return _wrap('MODEL_B', (
-                f'Model B generated code to answer "{user_query}" but it failed after '
-                f'one self-correction attempt.\n\n'
-                f'**Error:** `{out["error"]}`\n\n'
-                f'Try rephrasing the question, or switch to **Model A** for this query.'
-            ))
+            return _wrap('model_b_redirect', 'Ask **Model A** for this.')
 
     text = _format_result(out.get('result'))
     return _wrap('MODEL_B', text)
