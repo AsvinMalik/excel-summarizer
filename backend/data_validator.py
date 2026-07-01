@@ -91,9 +91,17 @@ def validate_sheet(df: pd.DataFrame, profile: dict, sheet_name: str) -> dict:
         # 3 & 4. Date range checks
         if col_name in df.columns and _is_date_column(col_name):
             try:
-                date_series = pd.to_datetime(df[col_name], errors='coerce').dropna()
+                # Force everything through to_datetime then re-cast the resulting
+                # Series explicitly — Excel columns can hold mixed Python datetime
+                # objects and integers (e.g. year numbers) that survive errors='coerce'
+                # as object dtype, causing '<' to fail between datetime and int.
+                raw = pd.to_datetime(df[col_name], errors='coerce')
+                date_series = pd.Series(
+                    pd.to_datetime(raw, errors='coerce'), dtype='datetime64[ns]'
+                ).dropna()
                 if len(date_series) > 0:
-                    future_count = int((date_series > pd.Timestamp.now()).sum())
+                    now = pd.Timestamp.now().normalize()
+                    future_count = int((date_series > now).sum())
                     if future_count > 0:
                         issues.append({
                             'severity': 'WARNING',
@@ -103,7 +111,9 @@ def validate_sheet(df: pd.DataFrame, profile: dict, sheet_name: str) -> dict:
                         })
                     min_date = date_series.min()
                     max_date = date_series.max()
-                    if min_date < pd.Timestamp('1900-01-01') or max_date > pd.Timestamp('2100-12-31'):
+                    lo = pd.Timestamp('1900-01-01')
+                    hi = pd.Timestamp('2100-12-31')
+                    if min_date < lo or max_date > hi:
                         issues.append({
                             'severity': 'ERROR',
                             'column': col_name,

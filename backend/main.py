@@ -115,8 +115,9 @@ from audit_logger import log_event, get_events, get_document_lineage, load_from_
 
 app = FastAPI(title="Procure.ai Backend")
 
-# Reload persisted audit events into memory so history survives backend restarts
-load_from_file()
+# Startup initialisation is done in the lifespan handler below so that
+# _load_snapshots (defined after DOCUMENT_STORE further down the file) is
+# already in scope when it runs.
 
 _default_origins = ["http://localhost:4173", "http://localhost:3000"]
 _extra_origins = [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()]
@@ -164,6 +165,7 @@ class ConversationMessage(BaseModel):
     session_id: str
     user_query: str
     context: Optional[dict] = None
+    preferred_model: Optional[str] = 'auto'  # 'auto' | 'phi3' | 'groq' | 'cerebras'
 
 class ExportRequest(BaseModel):
     content: dict
@@ -191,12 +193,59 @@ class RFQRefineRequest(BaseModel):
 class RFQExportRequest(BaseModel):
     draft: dict
 
-# In-memory stores for demo purpose
+# In-memory stores
 DOCUMENT_STORE = {}
 SESSION_STORE = {}
 TASK_STORE = {}
 
-DATA_PREVIEW_CHAR_LIMIT = 24000  # raised from 3000 to fit multi-sheet workbooks (was truncating to sheet 1 only)
+DATA_PREVIEW_CHAR_LIMIT = 24000
+
+# ── Snapshot persistence ──────────────────────────────────────────────────────
+# Processed document data (profile, schema, stats, etc.) is saved as a JSON
+# snapshot alongside each upload so it survives backend restarts. The raw bytes
+# are NOT stored in the snapshot — the query engine re-reads from file_path.
+_SNAPSHOT_DIR = os.path.join(os.path.dirname(__file__), 'snapshots')
+os.makedirs(_SNAPSHOT_DIR, exist_ok=True)
+
+_SNAPSHOT_SKIP = {'bytes', 'parsed_csv_full'}  # too large to serialise
+
+
+def _save_snapshot(doc_id: str) -> None:
+    """Persist a doc's processed metadata to disk (excludes raw bytes)."""
+    entry = DOCUMENT_STORE.get(doc_id)
+    if not entry or entry.get('status') != 'ready':
+        return
+    snapshot = {k: v for k, v in entry.items() if k not in _SNAPSHOT_SKIP}
+    try:
+        path = os.path.join(_SNAPSHOT_DIR, f'{doc_id}.json')
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(snapshot, f, default=str)
+    except Exception as e:
+        print(f'Snapshot save failed for {doc_id}: {e}')
+
+
+def _load_snapshots() -> None:
+    """Reload all saved snapshots into DOCUMENT_STORE at startup."""
+    if not os.path.isdir(_SNAPSHOT_DIR):
+        return
+    for fname in os.listdir(_SNAPSHOT_DIR):
+        if not fname.endswith('.json'):
+            continue
+        path = os.path.join(_SNAPSHOT_DIR, fname)
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                entry = json.load(f)
+            doc_id = entry.get('doc_id')
+            if not doc_id:
+                continue
+            # Restore bytes from the saved file_path if the file still exists
+            fp = entry.get('file_path')
+            if fp and os.path.exists(fp):
+                with open(fp, 'rb') as fb:
+                    entry['bytes'] = fb.read()
+            DOCUMENT_STORE[doc_id] = entry
+        except Exception as e:
+            print(f'Snapshot load failed for {fname}: {e}')
 
 
 def _enrich_doc(doc: dict) -> dict:
@@ -263,6 +312,7 @@ async def chat(request: ConversationMessage):
         user_query=request.user_query,
         document_context=enriched_context,
         session_state=load_session(request.session_id),
+        preferred_model=request.preferred_model or 'auto',
     )
     elapsed_ms = round((time() - t0) * 1000)
     save_conversation(request.session_id, request.user_query, response)
@@ -456,6 +506,13 @@ async def clear_session(session_id: str):
     clear_conversation_history(session_id)
     return JSONResponse({"status": "cleared"})
 
+@app.on_event("startup")
+async def _startup():
+    """Reload audit history and document snapshots after every restart."""
+    load_from_file()
+    _load_snapshots()
+
+
 @app.get("/health")
 async def health():
     return JSONResponse({"status": "ok", "version": "1.0"})
@@ -555,6 +612,7 @@ def queue_document_processing(doc_id: str, file_path: str, file_type: str, compa
 
             DOCUMENT_STORE[doc_id]["status"] = "ready"
             TASK_STORE[task_id]["status"] = "completed"
+            _save_snapshot(doc_id)
 
             # Audit: record the upload and any data quality findings
             sheet_issue_count = sum(

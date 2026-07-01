@@ -36,9 +36,15 @@ class Phi3Provider:
                 'model': OLLAMA_MODEL,
                 'messages': messages,
                 'stream': False,
-                'options': {'num_predict': max_tokens},
+                'options': {
+                    'num_predict': max_tokens,
+                    # Ollama defaults to 2048-token context which silently truncates
+                    # our 6000-10000 token document context blocks. phi3-mini supports
+                    # up to 128K — set to 12288 to fit full context without OOM risk.
+                    'num_ctx': 12288,
+                },
             },
-            timeout=120,
+            timeout=180,
         )
         response.raise_for_status()
         return response.json()['message']['content']

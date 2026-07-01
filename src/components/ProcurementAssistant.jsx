@@ -21,11 +21,19 @@ import { uploadDocument, sendChat, downloadInsightsPdf } from '../services/api';
 import { saveDocumentMetadata, deleteDocumentMetadata, getUserDocuments, saveChatMessage } from '../services/firestoreService';
 import { useAuth } from '../context/AuthContext';
 
+const MODELS = [
+  { value: 'auto',     label: 'Auto',     desc: 'Best available (Phi3 → Groq → Cerebras)' },
+  { value: 'phi3',     label: 'Phi3',     desc: 'Local — fast, private, no API cost' },
+  { value: 'groq',     label: 'Groq',     desc: 'Cloud — Llama 3.3 70B, high quality' },
+  { value: 'cerebras', label: 'Cerebras', desc: 'Cloud — GPT-OSS 120B, very fast' },
+];
+
 const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc, messages, setMessages, sessionId }) => {
   const [input, setInput] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
   const [downloadingInsights, setDownloadingInsights] = useState(false);
+  const [selectedModel, setSelectedModel] = useState('auto');
   const { user, logout } = useAuth();
   const messagesEnd = useRef(null);
 
@@ -69,7 +77,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
         documents: documents.map((doc) => ({ doc_id: doc.doc_id, id: doc.id, name: doc.name, type: doc.type, status: doc.status })),
       };
 
-      const response = await sendChat({ sessionId, userQuery: userText, context });
+      const response = await sendChat({ sessionId, userQuery: userText, context, preferredModel: selectedModel });
       const assistantText = Array.isArray(response.response)
         ? response.response
             .map((block) => (typeof block === 'string' ? block : block.text || JSON.stringify(block)))
@@ -82,6 +90,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
           id: Date.now() + 1,
           type: 'assistant',
           text: assistantText,
+          model: response.model,
         },
       ]);
 
@@ -410,6 +419,15 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
     </div>
   );
 
+  const MODEL_BADGE = {
+    PHI3_LOCAL: { label: 'Phi3 · Local', color: 'bg-emerald-100 text-emerald-700' },
+    GROQ:       { label: 'Groq · Llama 3.3', color: 'bg-purple-100 text-purple-700' },
+    CEREBRAS:   { label: 'Cerebras', color: 'bg-orange-100 text-orange-700' },
+    OPENROUTER: { label: 'OpenRouter', color: 'bg-sky-100 text-sky-700' },
+    deterministic: { label: 'Exact · No AI', color: 'bg-gray-100 text-gray-500' },
+    'deterministic-query-engine': { label: 'Query Engine', color: 'bg-gray-100 text-gray-500' },
+  };
+
   const MessageBubble = ({ msg }) => (
     <div className={`mb-4 flex ${msg.type === 'user' ? 'justify-end' : 'justify-start'}`}>
       <div className={`px-4 py-3 rounded-lg ${msg.type === 'user' ? 'max-w-2xl' : 'max-w-[min(94%,72rem)]'} ${
@@ -419,6 +437,11 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
           ? 'bg-blue-50 text-blue-900 border border-blue-200'
           : 'bg-gray-100 text-gray-900'
       }`}>
+        {msg.type === 'assistant' && msg.model && MODEL_BADGE[msg.model] && (
+          <span className={`inline-block text-[10px] font-semibold px-2 py-0.5 rounded-full mb-2 ${MODEL_BADGE[msg.model].color}`}>
+            {MODEL_BADGE[msg.model].label}
+          </span>
+        )}
         {msg.type === 'user' ? (
           <p className="text-sm leading-relaxed">{msg.text}</p>
         ) : (
@@ -508,6 +531,30 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
         </div>
 
         <div className="border-t border-gray-200 bg-white p-6">
+          {/* Model selector */}
+          <div className="flex items-center gap-2 mb-4">
+            <span className="text-xs font-medium text-gray-500 whitespace-nowrap">Model:</span>
+            <div className="flex gap-1 flex-wrap">
+              {MODELS.map((m) => (
+                <button
+                  key={m.value}
+                  type="button"
+                  title={m.desc}
+                  onClick={() => setSelectedModel(m.value)}
+                  className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${
+                    selectedModel === m.value
+                      ? 'bg-blue-600 text-white border-blue-600 shadow'
+                      : 'bg-white text-gray-600 border-gray-300 hover:border-blue-400 hover:text-blue-600'
+                  }`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            <span className="text-xs text-gray-400 hidden sm:block">
+              {MODELS.find(m => m.value === selectedModel)?.desc}
+            </span>
+          </div>
           <QuickActions />
           <div className="flex gap-3">
             <input

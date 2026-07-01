@@ -65,10 +65,36 @@ else:
     _CLOUD_AND_LOCAL_PROVIDERS = [_groq, _phi3, _cerebras]
 
 
-def create_chat_completion(messages: List[Dict[str, Any]], max_tokens: int = 1500) -> MockResponse:
+# Map frontend model-selector values to providers
+_MODEL_MAP = {
+    'auto':      None,           # use default chain
+    'phi3':      _phi3,
+    'groq':      _groq,
+    'cerebras':  _cerebras,
+}
+
+
+def create_chat_completion(
+    messages: List[Dict[str, Any]],
+    max_tokens: int = 1500,
+    preferred_model: str = 'auto',
+) -> MockResponse:
+    """Run the provider chain, optionally pinned to a specific model.
+
+    preferred_model values: 'auto' | 'phi3' | 'groq' | 'cerebras'
+    When pinned, the named provider is tried first; if it fails the normal
+    fallback chain still runs so the user always gets an answer.
+    """
     last_error = None
 
-    for level, provider in enumerate(_CLOUD_AND_LOCAL_PROVIDERS):
+    # Build ordered provider list: pinned provider first (if specified and valid)
+    pinned = _MODEL_MAP.get(preferred_model)
+    if pinned and pinned.is_configured:
+        ordered = [pinned] + [p for p in _CLOUD_AND_LOCAL_PROVIDERS if p is not pinned]
+    else:
+        ordered = _CLOUD_AND_LOCAL_PROVIDERS
+
+    for level, provider in enumerate(ordered):
         if not provider.is_configured:
             logger.info('provider=%s level=%d status=skipped reason=not_configured', provider.name, level)
             continue

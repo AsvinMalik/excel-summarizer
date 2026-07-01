@@ -568,7 +568,7 @@ def _try_answer_data_query(user_query: str, document_context: dict = None) -> Op
     return _format_query_result(spec, result)
 
 
-def procure_agent(user_query: str, document_context: dict = None, session_state: dict = None) -> dict:
+def procure_agent(user_query: str, document_context: dict = None, session_state: dict = None, preferred_model: str = 'auto') -> dict:
     structural_answer = _try_answer_structural_question(user_query, document_context)
     if structural_answer:
         return {
@@ -633,7 +633,7 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
     })
     messages.append({'role': 'user', 'content': user_query})
 
-    response = create_chat_completion(messages, max_tokens=1200)
+    response = create_chat_completion(messages, max_tokens=1200, preferred_model=preferred_model)
     text = response.choices[0].message.content
 
     # Numeric grounding: for precise figure queries the LLM must cite real values.
