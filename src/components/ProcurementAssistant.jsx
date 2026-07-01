@@ -20,20 +20,16 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { uploadDocument, sendChat, downloadInsightsPdf } from '../services/api';
 import { saveDocumentMetadata, deleteDocumentMetadata, getUserDocuments, saveChatMessage } from '../services/firestoreService';
 import { useAuth } from '../context/AuthContext';
-
-const MODELS = [
-  { value: 'auto',     label: 'Auto',     desc: 'Best available (Phi3 → Groq → Cerebras)' },
-  { value: 'phi3',     label: 'Phi3',     desc: 'Local — fast, private, no API cost' },
-  { value: 'groq',     label: 'Groq',     desc: 'Cloud — Llama 3.3 70B, high quality' },
-  { value: 'cerebras', label: 'Cerebras', desc: 'Cloud — GPT-OSS 120B, very fast' },
-];
+import { MODEL_OPTIONS } from '../config/modelOptions';
 
 const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc, messages, setMessages, sessionId }) => {
   const [input, setInput] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
   const [downloadingInsights, setDownloadingInsights] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('auto');
+  const [selectedModel, setSelectedModel] = useState(
+    () => localStorage.getItem('procure_ai_model_key') || 'auto'
+  );
   const { user, logout } = useAuth();
   const messagesEnd = useRef(null);
 
@@ -77,7 +73,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
         documents: documents.map((doc) => ({ doc_id: doc.doc_id, id: doc.id, name: doc.name, type: doc.type, status: doc.status })),
       };
 
-      const response = await sendChat({ sessionId, userQuery: userText, context, preferredModel: selectedModel });
+      const response = await sendChat({ sessionId, userQuery: userText, context, modelKey: selectedModel });
       const assistantText = Array.isArray(response.response)
         ? response.response
             .map((block) => (typeof block === 'string' ? block : block.text || JSON.stringify(block)))
@@ -420,12 +416,18 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
   );
 
   const MODEL_BADGE = {
-    PHI3_LOCAL: { label: 'Phi3 · Local', color: 'bg-emerald-100 text-emerald-700' },
-    GROQ:       { label: 'Groq · Llama 3.3', color: 'bg-purple-100 text-purple-700' },
-    CEREBRAS:   { label: 'Cerebras', color: 'bg-orange-100 text-orange-700' },
-    OPENROUTER: { label: 'OpenRouter', color: 'bg-sky-100 text-sky-700' },
-    deterministic: { label: 'Exact · No AI', color: 'bg-gray-100 text-gray-500' },
-    'deterministic-query-engine': { label: 'Query Engine', color: 'bg-gray-100 text-gray-500' },
+    PHI3_LOCAL:   { label: 'Phi3 · Local',    color: 'bg-emerald-100 text-emerald-700' },
+    GROQ:         { label: 'Groq · Llama 3.3', color: 'bg-purple-100 text-purple-700' },
+    CEREBRAS:     { label: 'Cerebras',          color: 'bg-orange-100 text-orange-700' },
+    OPENROUTER:   { label: 'OpenRouter',         color: 'bg-sky-100 text-sky-700' },
+    error:        { label: 'Model error',        color: 'bg-red-100 text-red-600' },
+    deterministic:               { label: 'Exact · No AI',  color: 'bg-gray-100 text-gray-500' },
+    'deterministic-query-engine':{ label: 'Query Engine',   color: 'bg-gray-100 text-gray-500' },
+  };
+
+  const handleModelSelect = (value) => {
+    setSelectedModel(value);
+    localStorage.setItem('procure_ai_model_key', value);
   };
 
   const MessageBubble = ({ msg }) => (
@@ -535,12 +537,12 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
           <div className="flex items-center gap-2 mb-4">
             <span className="text-xs font-medium text-gray-500 whitespace-nowrap">Model:</span>
             <div className="flex gap-1 flex-wrap">
-              {MODELS.map((m) => (
+              {MODEL_OPTIONS.map((m) => (
                 <button
                   key={m.value}
                   type="button"
                   title={m.desc}
-                  onClick={() => setSelectedModel(m.value)}
+                  onClick={() => handleModelSelect(m.value)}
                   className={`px-3 py-1 rounded-full text-xs font-semibold border transition-all ${
                     selectedModel === m.value
                       ? 'bg-blue-600 text-white border-blue-600 shadow'
@@ -552,7 +554,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
               ))}
             </div>
             <span className="text-xs text-gray-400 hidden sm:block">
-              {MODELS.find(m => m.value === selectedModel)?.desc}
+              {MODEL_OPTIONS.find(m => m.value === selectedModel)?.desc}
             </span>
           </div>
           <QuickActions />

@@ -3,17 +3,22 @@ import os
 import sys
 import time
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from ai_providers.groq_provider import GroqProvider
-from ai_providers.phi3_provider import Phi3Provider
-from ai_providers.cerebras_provider import CerebrasProvider
-from ai_providers.demo_provider import DemoProvider
-from openrouter_client import create_chat_completion as _openrouter_complete
+
+# Import shared provider instances from the preset registry so there's no duplicate state.
+from ai_providers.model_presets import (
+    PRESET_REGISTRY,
+    groq_provider as _groq,
+    phi3_provider as _phi3,
+    cerebras_provider as _cerebras,
+    openrouter_provider as _openrouter,
+    demo_provider as _demo,
+)
 
 os.makedirs(os.path.join(os.path.dirname(__file__), 'logs'), exist_ok=True)
 logger = logging.getLogger('procure_ai')
@@ -45,56 +50,83 @@ class MockResponse:
         self.model = model
 
 
-_groq = GroqProvider()
-_phi3 = Phi3Provider()
-_cerebras = CerebrasProvider()
-_demo = DemoProvider()
-
-# Fallback order per PROCURE_AI_ARCHITECTURE.md: Groq (primary, fastest) -> Phi3/Ollama
-# (unlimited local) -> Cerebras (secondary cloud). OpenRouter is kept as an extra layer
-# beyond the doc — it was already configured and working before this upgrade, so it adds
-# a free fifth chance before giving up to demo mode rather than removing capability.
-#
+# Fallback chain order per PROCURE_AI_ARCHITECTURE.md: Groq (primary) -> Phi3/Ollama
+# (unlimited local) -> Cerebras (secondary cloud).
 # PREFER_LOCAL_OLLAMA=true (set only in local backend/.env, never in production) moves
-# Phi3 to the front so local testing burns zero Groq/Cerebras/OpenRouter quota. Phi3 is
-# unreachable in production (no local Ollama there), so this is a no-op when deployed —
-# is_configured returns False and the chain falls through to Groq automatically.
+# Phi3 to the front so local testing burns zero Groq/Cerebras/OpenRouter quota.
 if os.getenv('PREFER_LOCAL_OLLAMA', 'false').lower() == 'true':
-    _CLOUD_AND_LOCAL_PROVIDERS = [_phi3, _groq, _cerebras]
+    _CHAIN = [_phi3, _groq, _cerebras]
 else:
-    _CLOUD_AND_LOCAL_PROVIDERS = [_groq, _phi3, _cerebras]
-
-
-# Map frontend model-selector values to providers
-_MODEL_MAP = {
-    'auto':      None,           # use default chain
-    'phi3':      _phi3,
-    'groq':      _groq,
-    'cerebras':  _cerebras,
-}
+    _CHAIN = [_groq, _phi3, _cerebras]
 
 
 def create_chat_completion(
     messages: List[Dict[str, Any]],
     max_tokens: int = 1500,
-    preferred_model: str = 'auto',
+    model_key: str = 'auto',
 ) -> MockResponse:
-    """Run the provider chain, optionally pinned to a specific model.
+    """Call one AI provider and return its response.
 
-    preferred_model values: 'auto' | 'phi3' | 'groq' | 'cerebras'
-    When pinned, the named provider is tried first; if it fails the normal
-    fallback chain still runs so the user always gets an answer.
+    model_key='auto' (default): run the provider chain (Groq -> Phi3 -> Cerebras ->
+    OpenRouter -> Demo) and return the first successful response.
+
+    model_key=<preset name>: call ONLY that specific provider. If the preset is unknown,
+    the provider is not configured, or the call fails, return a clear error message to the
+    user — NO silent fallback to a different model. The user explicitly chose this model
+    and must know when it's unavailable so they can switch.
     """
+    if model_key and model_key not in ('auto', None):
+        return _call_pinned(messages, max_tokens, model_key)
+    return _call_chain(messages, max_tokens)
+
+
+def _call_pinned(messages, max_tokens, model_key) -> MockResponse:
+    """Call exactly the provider named by model_key. Error out clearly if unavailable."""
+    preset = PRESET_REGISTRY.get(model_key)
+    if not preset:
+        known = ', '.join(PRESET_REGISTRY.keys())
+        error = (
+            f"Unknown model '{model_key}'. Valid options: auto, {known}. "
+            "Switch the model selector to one of these and try again."
+        )
+        logger.error('model_key=%s status=unknown_preset', model_key)
+        return MockResponse(error, 'error')
+
+    provider = preset['provider']
+    model_name = preset.get('model')
+
+    if not provider.is_configured:
+        error = (
+            f"**{model_key}** is not available in this environment. "
+            f"Check that the required API key or service is configured, "
+            f"or switch the model selector to **Auto** to use whatever is available."
+        )
+        logger.warning('model_key=%s status=not_configured', model_key)
+        return MockResponse(error, 'error')
+
+    start = time.monotonic()
+    try:
+        text = provider.complete(messages, max_tokens, model_name=model_name)
+        if not text:
+            raise RuntimeError('empty response')
+        elapsed = time.monotonic() - start
+        logger.info('model_key=%s provider=%s status=success elapsed=%.2fs', model_key, provider.name, elapsed)
+        return MockResponse(text, provider.name)
+    except Exception as e:
+        elapsed = time.monotonic() - start
+        error = (
+            f"**{model_key}** failed: {e}. "
+            f"Switch the model selector to **Auto** to use the fallback chain."
+        )
+        logger.warning('model_key=%s provider=%s status=failed elapsed=%.2fs error=%s', model_key, provider.name, elapsed, e)
+        return MockResponse(error, 'error')
+
+
+def _call_chain(messages, max_tokens) -> MockResponse:
+    """Run the full provider chain; last resort is Demo mode."""
     last_error = None
 
-    # Build ordered provider list: pinned provider first (if specified and valid)
-    pinned = _MODEL_MAP.get(preferred_model)
-    if pinned and pinned.is_configured:
-        ordered = [pinned] + [p for p in _CLOUD_AND_LOCAL_PROVIDERS if p is not pinned]
-    else:
-        ordered = _CLOUD_AND_LOCAL_PROVIDERS
-
-    for level, provider in enumerate(ordered):
+    for level, provider in enumerate(_CHAIN):
         if not provider.is_configured:
             logger.info('provider=%s level=%d status=skipped reason=not_configured', provider.name, level)
             continue
@@ -111,14 +143,18 @@ def create_chat_completion(
             last_error = e
             logger.warning('provider=%s level=%d status=failed elapsed=%.2fs error=%s', provider.name, level, elapsed, e)
 
-    start = time.monotonic()
-    response = _openrouter_complete(messages, max_tokens)
-    elapsed = time.monotonic() - start
-    if response.model != 'demo':
-        logger.info('provider=OPENROUTER level=3 status=success elapsed=%.2fs model=%s', elapsed, response.model)
-        return response
-    logger.warning('provider=OPENROUTER level=3 status=failed elapsed=%.2fs', elapsed)
-    last_error = last_error or 'OpenRouter unavailable or unconfigured'
+    # OpenRouter as an extra chance beyond the main chain
+    if _openrouter.is_configured:
+        start = time.monotonic()
+        try:
+            text = _openrouter.complete(messages, max_tokens)
+            elapsed = time.monotonic() - start
+            logger.info('provider=OPENROUTER level=3 status=success elapsed=%.2fs', elapsed)
+            return MockResponse(text, _openrouter.name)
+        except Exception as e:
+            elapsed = time.monotonic() - start
+            last_error = e
+            logger.warning('provider=OPENROUTER level=3 status=failed elapsed=%.2fs error=%s', elapsed, e)
 
     logger.error('provider=DEMO level=4 status=fallback last_error=%s', last_error)
     text = _demo.complete(messages, max_tokens, error=str(last_error))

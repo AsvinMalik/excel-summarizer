@@ -522,6 +522,9 @@ def _try_answer_data_query(user_query: str, document_context: dict = None) -> Op
     )
 
     try:
+        # spec-generation always uses the default chain regardless of the caller's model_key —
+        # this is a structured JSON task (not a user-facing answer) and accuracy matters more
+        # than matching the user's preferred provider. Weak local models are unreliable here.
         response = create_chat_completion(
             [
                 {'role': 'system', 'content': 'You translate data questions into structured pandas query specs. Output JSON only, nothing else.'},
@@ -568,7 +571,7 @@ def _try_answer_data_query(user_query: str, document_context: dict = None) -> Op
     return _format_query_result(spec, result)
 
 
-def procure_agent(user_query: str, document_context: dict = None, session_state: dict = None, preferred_model: str = 'auto') -> dict:
+def procure_agent(user_query: str, document_context: dict = None, session_state: dict = None, model_key: str = 'auto') -> dict:
     structural_answer = _try_answer_structural_question(user_query, document_context)
     if structural_answer:
         return {
@@ -633,7 +636,7 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
     })
     messages.append({'role': 'user', 'content': user_query})
 
-    response = create_chat_completion(messages, max_tokens=1200, preferred_model=preferred_model)
+    response = create_chat_completion(messages, max_tokens=1200, model_key=model_key)
     text = response.choices[0].message.content
 
     # Numeric grounding: for precise figure queries the LLM must cite real values.
@@ -667,7 +670,7 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
                     'there in the context, use it normally.'
                 )},
             ]
-            retry_response = create_chat_completion(correction_messages, max_tokens=1200)
+            retry_response = create_chat_completion(correction_messages, max_tokens=1200, model_key=model_key)
             text = retry_response.choices[0].message.content
         else:
             if find_unverifiable_numbers(text, known_values):

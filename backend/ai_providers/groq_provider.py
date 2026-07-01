@@ -20,9 +20,9 @@ class GroqProvider:
     def is_configured(self) -> bool:
         return self._client is not None
 
-    def complete(self, messages: List[Dict[str, Any]], max_tokens: int = 1500) -> str:
+    def complete(self, messages: List[Dict[str, Any]], max_tokens: int = 1500, model_name: str = None) -> str:
         response = self._client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=model_name or GROQ_MODEL,
             messages=messages,
             max_tokens=max_tokens,
         )

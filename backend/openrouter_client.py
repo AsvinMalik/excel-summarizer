@@ -49,6 +49,39 @@ FALLBACK_MODELS = list(dict.fromkeys([
 ]))
 
 
+class OpenRouterProvider:
+    """Provider class wrapping OpenRouter — used by the preset registry for explicit model selection."""
+
+    name = 'OPENROUTER'
+
+    def __init__(self):
+        self._client = _client
+
+    @property
+    def is_configured(self) -> bool:
+        return self._client is not None
+
+    def complete(self, messages: List[Dict[str, Any]], max_tokens: int = 1500, model_name: str = None) -> str:
+        if not self._client:
+            raise RuntimeError('OpenRouter is not configured — set OPENROUTER_API_KEY in backend/.env')
+        models_to_try = [model_name] if model_name else FALLBACK_MODELS
+        last_error = None
+        for model in models_to_try:
+            try:
+                response = self._client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                )
+                text = response.choices[0].message.content if response.choices else None
+                if text:
+                    return text
+            except Exception as e:
+                last_error = e
+                print(f"OpenRouter API Error ({model}): {e}")
+        raise RuntimeError(f'OpenRouter failed on all tried models. Last error: {last_error}')
+
+
 def create_chat_completion(messages: List[Dict[str, Any]], max_tokens: int = 1500) -> MockResponse:
     if not _client:
         return _create_demo_response(messages, max_tokens)

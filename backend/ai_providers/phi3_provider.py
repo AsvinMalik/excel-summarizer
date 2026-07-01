@@ -29,11 +29,11 @@ class Phi3Provider:
                 self._available = False
         return self._available
 
-    def complete(self, messages: List[Dict[str, Any]], max_tokens: int = 1500) -> str:
+    def complete(self, messages: List[Dict[str, Any]], max_tokens: int = 1500, model_name: str = None) -> str:
         response = requests.post(
             f'{OLLAMA_URL}/api/chat',
             json={
-                'model': OLLAMA_MODEL,
+                'model': model_name or OLLAMA_MODEL,
                 'messages': messages,
                 'stream': False,
                 'options': {

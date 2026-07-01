@@ -165,7 +165,7 @@ class ConversationMessage(BaseModel):
     session_id: str
     user_query: str
     context: Optional[dict] = None
-    preferred_model: Optional[str] = 'auto'  # 'auto' | 'phi3' | 'groq' | 'cerebras'
+    model_key: Optional[str] = 'auto'  # 'auto' | 'phi3' | 'groq' | 'cerebras' | 'openrouter'
 
 class ExportRequest(BaseModel):
     content: dict
@@ -312,7 +312,7 @@ async def chat(request: ConversationMessage):
         user_query=request.user_query,
         document_context=enriched_context,
         session_state=load_session(request.session_id),
-        preferred_model=request.preferred_model or 'auto',
+        model_key=request.model_key or 'auto',
     )
     elapsed_ms = round((time() - t0) * 1000)
     save_conversation(request.session_id, request.user_query, response)

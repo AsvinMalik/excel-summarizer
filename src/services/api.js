@@ -18,11 +18,11 @@ async function uploadDocument({ file, company, userId }) {
   return response.json();
 }
 
-async function sendChat({ sessionId, userQuery, context, preferredModel = 'auto' }) {
+async function sendChat({ sessionId, userQuery, context, modelKey = 'auto' }) {
   const response = await fetch(`${BASE_URL}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, user_query: userQuery, context, preferred_model: preferredModel }),
+    body: JSON.stringify({ session_id: sessionId, user_query: userQuery, context, model_key: modelKey }),
   });
 
   if (!response.ok) {
