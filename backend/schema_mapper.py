@@ -156,7 +156,10 @@ def infer_column_semantic_type(col_name: str, series: pd.Series) -> str:
     if n_total == 0:
         return 'text'
 
-    n_unique = non_null.nunique()
+    try:
+        n_unique = non_null.nunique()
+    except TypeError:
+        n_unique = non_null.astype(str).nunique()
     uniqueness = n_unique / n_total
 
     if n_unique <= 20:
@@ -174,7 +177,11 @@ def identify_primary_key(df: pd.DataFrame) -> str | None:
         series = df[col].dropna()
         if len(series) == 0 or len(series) != len(df):
             continue  # skip if there are nulls at all — PK must be complete
-        uniqueness = series.nunique() / len(series)
+        try:
+            n_unique = series.nunique()
+        except TypeError:
+            n_unique = series.astype(str).nunique()
+        uniqueness = n_unique / len(series)
         if uniqueness < 1.0:
             continue  # must be fully unique
         is_id_named = bool(_ID_RE.search(col))

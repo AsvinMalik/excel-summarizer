@@ -881,21 +881,51 @@ def queue_document_processing(doc_id: str, file_path: str, file_type: str, compa
 
             # Multi-sheet relationship detection: finds FK links between sheets by
             # column name matching + value overlap, classifies each sheet's role
-            # (fact/dimension/reference), and builds a unified schema. Stored at
-            # upload time so every subsequent chat/report call can use it without
-            # re-reading the file.
-            relationships = detect_relationships(all_sheets)
-            roles = classify_sheet_roles(all_sheets, relationships)
-            unified_schema = build_unified_schema(all_sheets, profile, relationships, roles)
-            schema_context = build_schema_context(all_sheets, profile, relationships)
+            # (fact/dimension/reference), and builds a unified schema. Each step
+            # is isolated so a failure in one never blocks status="ready".
+            relationships = []
+            try:
+                relationships = detect_relationships(all_sheets)
+            except Exception as _e:
+                logger.error("detect_relationships failed: %s", _e, exc_info=True)
+
+            roles = {}
+            try:
+                roles = classify_sheet_roles(all_sheets, relationships)
+            except Exception as _e:
+                logger.error("classify_sheet_roles failed: %s", _e, exc_info=True)
+
+            unified_schema = {}
+            try:
+                unified_schema = build_unified_schema(all_sheets, profile, relationships, roles)
+            except Exception as _e:
+                logger.error("build_unified_schema failed: %s", _e, exc_info=True)
+
+            schema_context = {}
+            try:
+                schema_context = build_schema_context(all_sheets, profile, relationships)
+            except Exception as _e:
+                logger.error("build_schema_context failed: %s", _e, exc_info=True)
+
             DOCUMENT_STORE[doc_id]["unified_schema"] = unified_schema
             DOCUMENT_STORE[doc_id]["schema_context"] = schema_context
 
             # Data quality validation and statistical analysis — both computed
             # once at upload and injected into LLM context on every request.
-            validation = validate_workbook(all_sheets, profile)
+            validation = {}
+            try:
+                validation = validate_workbook(all_sheets, profile)
+            except Exception as _e:
+                logger.error("validate_workbook failed: %s", _e, exc_info=True)
+
+            statistics = {}
+            try:
+                statistics = analyze_workbook(all_sheets, profile)
+            except Exception as _e:
+                logger.error("analyze_workbook failed: %s", _e, exc_info=True)
+
             DOCUMENT_STORE[doc_id]["validation"] = validation
-            DOCUMENT_STORE[doc_id]["statistics"] = analyze_workbook(all_sheets, profile)
+            DOCUMENT_STORE[doc_id]["statistics"] = statistics
 
             DOCUMENT_STORE[doc_id]["status"] = "ready"
             TASK_STORE[task_id]["status"] = "completed"
@@ -919,7 +949,7 @@ def queue_document_processing(doc_id: str, file_path: str, file_type: str, compa
                 extra={'sheet_count': len(sheet_names), 'sheet_names': sheet_names},
             )
     except Exception as e:
-        print(f"Error processing Excel: {e}")
+        logger.error("Fatal error processing Excel (doc_id=%s): %s", doc_id, e, exc_info=True)
         DOCUMENT_STORE[doc_id]["status"] = "error"
         TASK_STORE[task_id]["status"] = "failed"
         

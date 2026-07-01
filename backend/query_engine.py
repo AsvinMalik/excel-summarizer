@@ -17,7 +17,15 @@ _VALID_FILTER_OPS = {'>', '>=', '<', '<=', '==', '!='}
 
 
 def load_all_sheets(file_path: str) -> dict:
-    return pd.read_excel(file_path, sheet_name=None)
+    import sys
+    raw = pd.read_excel(file_path, sheet_name=None)
+    # Late-import _clean_sheet_headers from main to avoid circular import.
+    # Always available in server context; falls back to raw sheets in test scripts.
+    _main = sys.modules.get('main')
+    clean = getattr(_main, '_clean_sheet_headers', None)
+    if callable(clean):
+        return {name: clean(df) for name, df in raw.items()}
+    return raw
 
 
 def _coerce_filter_value(raw_value):

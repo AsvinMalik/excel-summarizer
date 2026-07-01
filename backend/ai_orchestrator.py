@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'), override=True)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -55,9 +55,9 @@ class MockResponse:
 # PREFER_LOCAL_OLLAMA=true (set only in local backend/.env, never in production) moves
 # Phi3 to the front so local testing burns zero Groq/Cerebras/OpenRouter quota.
 if os.getenv('PREFER_LOCAL_OLLAMA', 'false').lower() == 'true':
-    _CHAIN = [_phi3, _groq, _cerebras]
+    _CHAIN = [_phi3, _cerebras, _groq]
 else:
-    _CHAIN = [_groq, _phi3, _cerebras]
+    _CHAIN = [_cerebras, _groq, _phi3]
 
 
 def create_chat_completion(
