@@ -582,8 +582,6 @@ _PROVIDER_CHUNK_BUDGETS: dict = {
     'groq':       40_000,   # ~10 000 tokens — large chunks, few calls
     'cerebras':   40_000,   # same as Groq
     'openrouter': 12_000,   # conservative for free-tier models
-    'gemini':     60_000,   # Gemini 1.5 Pro — very generous
-    'openai':     16_000,   # GPT-4o-mini conservative
     'auto':       12_000,   # default for auto chain (safe for all providers)
 }
 _CHUNK_CHAR_BUDGET = _PROVIDER_CHUNK_BUDGETS['auto']  # backward-compat default

@@ -21,12 +21,12 @@ Focus on being concise but comprehensive."""
 
 def analyze_excel_data(file_path: str, user_query: str = None) -> Dict[str, Any]:
     """
-    Analyze an Excel file using Gemini AI.
-    
+    Analyze an Excel file using the AI orchestrator chain.
+
     Args:
         file_path: Path to the uploaded Excel file
         user_query: Optional user question about the data
-    
+
     Returns:
         Analysis result with insights and findings
     """
@@ -82,7 +82,6 @@ Include:
 4. Actionable insights
 """
         
-        # Call Gemini API
         messages = [
             {'role': 'system', 'content': SYSTEM_PROMPT},
             {'role': 'user', 'content': prompt}

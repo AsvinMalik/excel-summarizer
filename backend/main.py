@@ -368,8 +368,6 @@ _PROVIDER_PREVIEW_LIMITS: dict = {
     'groq':      100_000,   # Groq llama-3.3-70b: 131 072-token window
     'cerebras':  100_000,   # Cerebras llama-3.1-70b: 128 000-token window
     'openrouter': 48_000,   # OpenRouter free tier: variable, conservative 12k tok
-    'gemini':    200_000,   # Gemini 1.5 Pro: 1 M token window — generous cap
-    'openai':     48_000,   # OpenAI GPT-4o-mini free tier: conservative
     'auto':       72_000,   # Auto chain: budget for the smallest likely provider
 }
 DATA_PREVIEW_CHAR_LIMIT = _PROVIDER_PREVIEW_LIMITS['auto']  # backward-compat default
@@ -667,7 +665,6 @@ async def analyze_document(request: dict):
         return JSONResponse({"error": "Document not found"}, status_code=404)
     
     try:
-        # Use Gemini to analyze the document
         file_path = doc.get('file_path')
         analysis = analyze_excel_data(file_path, None)
         return JSONResponse({
@@ -688,7 +685,6 @@ async def query_spreadsheet(request: dict):
         return JSONResponse({"error": "Document not found"}, status_code=404)
     
     try:
-        # Use Gemini to answer natural language query about the spreadsheet
         file_path = doc.get('file_path')
         result = query_spreadsheet_data(file_path, nl_query)
         return JSONResponse({
