@@ -21,9 +21,13 @@ class CerebrasProvider:
         return self._client is not None
 
     def complete(self, messages: List[Dict[str, Any]], max_tokens: int = 1500, model_name: str = None) -> str:
+        # gpt-oss-120b is a reasoning model that consumes hidden reasoning tokens before
+        # generating visible content. Enforce a minimum so small callers (router, map-reduce)
+        # don't exhaust the budget on reasoning alone and get content=None back.
+        effective_max = max(max_tokens, 200)
         response = self._client.chat.completions.create(
             model=model_name or CEREBRAS_MODEL,
             messages=messages,
-            max_tokens=max_tokens,
+            max_tokens=effective_max,
         )
         return response.choices[0].message.content
