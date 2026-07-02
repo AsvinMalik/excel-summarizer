@@ -25,6 +25,14 @@ async function sendChat({ sessionId, userQuery, context, modelKey = 'model_a', p
     body: JSON.stringify({ session_id: sessionId, user_query: userQuery, context, model_key: modelKey, provider_key: providerKey }),
   });
 
+  if (response.status === 503) {
+    const body = await response.json().catch(() => ({}));
+    const err = new Error(body.error || 'All AI providers are currently unavailable. Please retry.');
+    err.status = 503;
+    err.providers_tried = body.providers_tried || [];
+    throw err;
+  }
+
   if (!response.ok) {
     throw new Error(`Chat request failed: ${response.statusText}`);
   }

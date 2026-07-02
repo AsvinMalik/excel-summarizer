@@ -57,9 +57,17 @@ def _is_header_candidate(row_vals: list) -> bool:
     - <15% are bare numeric values or numeric-looking strings  ← FX-rate guard
     - Average string length <50 chars (column names are short; prose/titles aren't)
     - No backtick characters (garbled encoding artifact)
+    - NOT a group-label row: sparse rows (< 25% fill AND < 5 non-null) are group
+      labels like 'Actual'/'Budget' spanning a wide sheet, not real headers.
     """
     non_null = [v for v in row_vals if pd.notna(v) and str(v).strip() not in ('', 'nan')]
     if len(non_null) < 2:
+        return False
+
+    # Phase 2: guard against promoting sparse group-label rows as headers.
+    # Example: ['Actual', NaN, NaN, ..., 'Budget', NaN, ...] (2 non-null in 24 cols)
+    fill_ratio = len(non_null) / max(len(row_vals), 1)
+    if fill_ratio < 0.25 and len(non_null) < 5:
         return False
 
     str_vals   = [v for v in non_null if isinstance(v, str) and not _looks_numeric_string(v)]
@@ -80,19 +88,64 @@ def _is_header_candidate(row_vals: list) -> bool:
     )
 
 
-def _promote_row_as_headers(df: pd.DataFrame, data_row_idx: int) -> pd.DataFrame:
-    """Promote df.iloc[data_row_idx] into column names, combining with any
-    non-Unnamed parent header already in df.columns (two-row header pattern)."""
+def _is_group_label_row(row_vals: list) -> bool:
+    """True when a sparse row contains short string labels meant as group headers.
+
+    Group-label rows (e.g. 'Actual' / 'Budget' in a wide sheet) are distinguished
+    from title rows by having ≥2 distinct values, and from real header rows by
+    having very low column fill (< 40%) with short string content.
+    """
+    non_null = [v for v in row_vals if pd.notna(v) and str(v).strip() not in ('', 'nan')]
+    if len(non_null) < 1:
+        return False
+    fill_ratio = len(non_null) / max(len(row_vals), 1)
+    if fill_ratio >= 0.40:
+        return False  # too dense — probably a real header row
+    str_vals = [v for v in non_null
+                if isinstance(v, str) and not _looks_numeric_string(v) and v.strip()]
+    if not str_vals:
+        return False
+    avg_len = sum(len(v) for v in str_vals) / len(str_vals)
+    return avg_len < 60  # group labels are short; long strings are titles
+
+
+def _promote_row_as_headers(df: pd.DataFrame, data_row_idx: int,
+                             group_row: list = None) -> pd.DataFrame:
+    """Promote df.iloc[data_row_idx] into column names.
+
+    If group_row is given (Phase 2 compound-header support), forward-fill its
+    sparse labels across columns and prefix each leaf name: 'Actual_Sales',
+    'Budget_PBT', etc.  Leaf names without a group prefix are kept as-is.
+    """
     candidate = df.iloc[data_row_idx]
+
+    # Build forward-filled group labels from the group row (if provided).
+    group_labels: list = [''] * len(df.columns)
+    if group_row is not None and len(group_row) >= len(df.columns):
+        current_grp = ''
+        for i, val in enumerate(group_row[:len(df.columns)]):
+            s = str(val).strip() if pd.notna(val) and str(val).strip() not in ('', 'nan') else ''
+            if s and len(s) <= 50:   # ignore very long merged titles
+                current_grp = s
+            group_labels[i] = current_grp
+
     new_cols: list = []
     seen: dict = {}
-    for orig_col, sub_val in zip(df.columns, candidate):
+    for i, (orig_col, sub_val) in enumerate(zip(df.columns, candidate)):
+        grp = group_labels[i]
         parent = str(orig_col) if not str(orig_col).startswith('Unnamed') else ''
         # Garbled single-char symbols and formula strings are not real parent labels
         if len(parent) <= 1 or '`' in parent or parent.startswith('='):
             parent = ''
         sub = str(sub_val).strip() if pd.notna(sub_val) and str(sub_val) != 'nan' else ''
-        if parent and sub and parent != sub:
+
+        if grp and sub and grp != sub:
+            name = f'{grp}_{sub}'
+        elif sub:
+            name = sub
+        elif grp:
+            name = grp
+        elif parent and sub and parent != sub:
             name = f'{parent} - {sub}'
         elif sub:
             name = sub
@@ -100,6 +153,7 @@ def _promote_row_as_headers(df: pd.DataFrame, data_row_idx: int) -> pd.DataFrame
             name = parent
         else:
             name = f'Col_{len(new_cols)}'
+
         if name in seen:
             seen[name] += 1
             name = f'{name}_{seen[name]}'
@@ -188,12 +242,13 @@ def _clean_sheet_headers(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     # ── Case 1: scan the first data rows for the real header ─────────────────
-    # Skip confirmed title/blank rows AND sparse junk rows (e.g. a single
-    # "99" or "(US$ in '000s)" that sits between the title and the header).
-    # Stop as soon as we find a genuine header candidate or hit a dense data
-    # row (fail closed — leave as-is rather than eat real data rows).
+    # Skip confirmed title/blank rows AND sparse junk rows.  Phase 2 extension:
+    # when a sparse row contains short string labels (e.g. 'Actual' / 'Budget'),
+    # save it as a group-label row so compound column names can be built when the
+    # real header is found on the next non-title, non-sparse row.
     MAX_SCAN = 6
     rows_to_skip = 0
+    pending_group_row: list = None   # Phase 2: group labels row
 
     for scan_idx in range(min(MAX_SCAN, len(df))):
         row_list = list(df.iloc[scan_idx])
@@ -205,16 +260,25 @@ def _clean_sheet_headers(df: pd.DataFrame) -> pd.DataFrame:
         if _is_title_row(row_list, len(cols)):
             # Confirmed title/blank — skip it and keep scanning
             rows_to_skip = scan_idx + 1
+            pending_group_row = None   # title resets any pending group context
+            continue
+
+        # Phase 2: check group-label rows BEFORE header-candidate so that a sparse
+        # 'Actual'/'Budget' row is saved as a group row rather than mistakenly
+        # promoted as the real header.  Group detection wins when both match.
+        if _is_group_label_row(row_list):
+            pending_group_row = row_list
+            rows_to_skip = scan_idx + 1
             continue
 
         if _is_header_candidate(row_list):
-            # This row looks like real column headers — promote it
+            # This row looks like real column headers — promote it, with optional
+            # compound-name expansion if a group row was saved just before it.
             df = df.iloc[rows_to_skip:].reset_index(drop=True)
             promote_at = scan_idx - rows_to_skip
-            return _promote_row_as_headers(df, promote_at)
+            return _promote_row_as_headers(df, promote_at, group_row=pending_group_row)
 
-        # Sparse row (e.g. a units note "99 / (US$ in '000s)" between the
-        # title and the real header) — skip it rather than stopping the scan.
+        # Sparse non-label row (junk / blank separator) — skip it.
         if non_null_count < max(3, len(cols) * 0.30):
             rows_to_skip = scan_idx + 1
             continue
@@ -420,16 +484,15 @@ def _load_snapshots() -> None:
             print(f'Snapshot load failed for {fname}: {e}')
 
 
-def _extract_sheet_section(parsed_csv: str, sheet_name: str) -> str:
-    """Pull one sheet's block out of the multi-sheet CSV preview string.
+def _extract_sheet_section(parsed_csv: str, sheet_name: str,
+                           parsed_sheets: dict = None) -> str:
+    """Return one sheet's preview block.
 
-    Preview blocks look like:
-        === Sheet: SheetName (N rows x M cols) ===
-        Columns: ...
-        <csv rows>
-
-        === Sheet: NextSheet ...
+    Tries parsed_sheets dict (O(1), post-cleaning) first; falls back
+    to regex over the legacy flat parsed_csv for old snapshots.
     """
+    if parsed_sheets and sheet_name in parsed_sheets:
+        return parsed_sheets[sheet_name]
     escaped = _re.escape(sheet_name)
     pattern = rf'(=== Sheet: {escaped} .*?)(?=\n=== Sheet: |\Z)'
     m = _re.search(pattern, parsed_csv, _re.DOTALL)
@@ -457,7 +520,8 @@ def _enrich_doc(doc: dict, provider_key: str = 'auto') -> dict:
     if active_sheet and isinstance(profile, dict) and active_sheet in profile:
         # Narrow each per-sheet dict to just the active sheet so the AI sees
         # only the data it's currently looking at.
-        sheet_section = _extract_sheet_section(preview, active_sheet)
+        sheet_section = _extract_sheet_section(
+            preview, active_sheet, parsed_sheets=stored.get('parsed_sheets'))
         if sheet_section:
             preview = sheet_section
 
@@ -514,6 +578,111 @@ def enrich_document_context(context: Optional[dict], provider_key: str = 'auto')
         'documents': [_enrich_doc(doc, provider_key) for doc in context.get('documents') or []],
     }
 
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Whole-file summary via cached map-reduce
+# ---------------------------------------------------------------------------
+_SHEET_SUMMARY_CHAR_LIMIT = 6000   # per-sheet preview sent to LLM
+_SHEET_SUMMARY_LLM_DELAY = 2.0     # seconds between cloud calls
+
+
+def _sheet_is_empty(section: str) -> bool:
+    """True when a parsed_sheets section contains no data rows."""
+    return '(no data rows' in section or section.strip() == ''
+
+
+def summarize_workbook(doc_id: str, provider_key: str = 'auto') -> dict:
+    """Produce per-sheet summaries and a combined overview via map-reduce.
+
+    Results are cached in DOCUMENT_STORE and persisted to the snapshot so
+    subsequent calls cost zero tokens.  Returns {sheet_name: {"summary": str,
+    "model": str, "ts": str}, "__combined__": {"summary": str, ...}}.
+    """
+    import time as _time_mod
+    from datetime import datetime, timezone
+    from ai_orchestrator import create_chat_completion
+
+    stored = DOCUMENT_STORE.get(doc_id)
+    if not stored:
+        return {}
+
+    sheet_names: list = stored.get('sheet_names') or []
+    parsed_sheets: dict = stored.get('parsed_sheets') or {}
+    existing: dict = stored.get('sheet_summaries') or {}
+
+    summaries: dict = dict(existing)  # start with cache
+    newly_generated = False
+
+    for sn in sheet_names:
+        if sn in summaries:
+            continue  # cache hit
+
+        section = parsed_sheets.get(sn, '')
+        if _sheet_is_empty(section):
+            summaries[sn] = {
+                'summary': 'Template sheet — headers only, no data.',
+                'model': 'hardcoded',
+                'ts': datetime.now(timezone.utc).isoformat(),
+            }
+            continue
+
+        snippet = section[:_SHEET_SUMMARY_CHAR_LIMIT]
+        prompt = (
+            f"Summarize this sheet in 2-3 sentences. "
+            f"State what it tracks and the key numeric fields. "
+            f"Be concise.\n\n{snippet}"
+        )
+        messages = [{'role': 'user', 'content': prompt}]
+
+        try:
+            resp = create_chat_completion(messages, max_tokens=200,
+                                         provider_key=provider_key)
+            text = (resp.choices[0].message.content or '').strip()
+            model = getattr(resp, 'model', provider_key)
+        except Exception as e:
+            text = f'Summary unavailable ({e})'
+            model = 'error'
+
+        summaries[sn] = {
+            'summary': text,
+            'model': model,
+            'ts': datetime.now(timezone.utc).isoformat(),
+        }
+        newly_generated = True
+        _time_mod.sleep(_SHEET_SUMMARY_LLM_DELAY)
+
+    # Reduce step: combine mini-summaries
+    if '__combined__' not in summaries or newly_generated:
+        mini_block = '\n'.join(
+            f"[{sn}]: {v['summary']}" for sn, v in summaries.items() if sn != '__combined__'
+        )
+        reduce_prompt = (
+            f"You are given per-sheet summaries of a business workbook. "
+            f"Write a 4-6 sentence overview of the entire file — what it contains, "
+            f"key financial/operational themes, and how the sheets relate.\n\n{mini_block}"
+        )
+        try:
+            resp = create_chat_completion(
+                [{'role': 'user', 'content': reduce_prompt}],
+                max_tokens=400, provider_key=provider_key,
+            )
+            combined_text = (resp.choices[0].message.content or '').strip()
+            combined_model = getattr(resp, 'model', provider_key)
+        except Exception as e:
+            combined_text = f'Combined overview unavailable ({e})'
+            combined_model = 'error'
+
+        summaries['__combined__'] = {
+            'summary': combined_text,
+            'model': combined_model,
+            'ts': datetime.now(timezone.utc).isoformat(),
+        }
+
+    # Persist cache
+    DOCUMENT_STORE[doc_id]['sheet_summaries'] = summaries
+    _save_snapshot(doc_id)
+    return summaries
+
 @app.post("/api/upload")
 async def upload_document(file: UploadFile = File(...), company: str = None, user_id: str = None):
     doc_id = str(uuid.uuid4())
@@ -536,15 +705,76 @@ async def upload_document(file: UploadFile = File(...), company: str = None, use
 
 @app.post("/api/chat")
 async def chat(request: ConversationMessage):
-    enriched_context = enrich_document_context(request.context, request.provider_key or 'auto')
+    from sheet_router import route_question as _route_question
+
+    # --- Phase 3: sheet routing before enrichment so _enrich_doc scopes correctly ---
+    ctx = dict(request.context) if request.context else {}
+    active_doc_ctx = dict(ctx.get('active_document') or {})
+    routed_sheet: str | None = None
+    router_reason: str = ''
+    router_tier: str = ''
+
+    # Only route if the user hasn't manually picked a sheet
+    _whole_file_summary: dict | None = None
+    if active_doc_ctx.get('doc_id') and not active_doc_ctx.get('active_sheet'):
+        doc_id = active_doc_ctx['doc_id']
+        stored = DOCUMENT_STORE.get(doc_id)
+        if stored and stored.get('sheet_names'):
+            try:
+                route = _route_question(request.user_query, stored)
+                sheets = route.get('sheets', [])
+                router_reason = route.get('reason', '')
+                router_tier = route.get('tier', '')
+                if sheets and sheets[0] == '__ALL__':
+                    # Phase 4: whole-file question → map-reduce summary path
+                    _whole_file_summary = summarize_workbook(
+                        doc_id, provider_key=request.provider_key or 'auto')
+                    routed_sheet = '__ALL__'
+                elif sheets:
+                    routed_sheet = sheets[0]
+                    active_doc_ctx['active_sheet'] = routed_sheet
+                    ctx['active_document'] = active_doc_ctx
+            except Exception as _re:
+                logger.warning(f'Sheet router failed: {_re}')
+
+    # Phase 4 short-circuit: return map-reduce summary directly
+    if _whole_file_summary:
+        combined = _whole_file_summary.get('__combined__', {})
+        combined_text = combined.get('summary', 'Summary unavailable.')
+        return JSONResponse({
+            "session_id": request.session_id,
+            "response": [{"type": "text", "text": combined_text}],
+            "tool_calls": [],
+            "timestamp": None,
+            "model": combined.get('model', 'map-reduce'),
+            "routed_sheet": "__ALL__",
+            "router_reason": router_reason,
+            "router_tier": router_tier,
+        })
+
+    from ai_orchestrator import AllProvidersUnavailable
+
+    enriched_context = enrich_document_context(ctx, request.provider_key or 'auto')
     t0 = time()
-    response = procure_agent(
-        user_query=request.user_query,
-        document_context=enriched_context,
-        session_state=load_session(request.session_id),
-        model_key=request.model_key or 'model_a',
-        provider_key=request.provider_key or 'auto',
-    )
+    try:
+        response = procure_agent(
+            user_query=request.user_query,
+            document_context=enriched_context,
+            session_state=load_session(request.session_id),
+            model_key=request.model_key or 'model_a',
+            provider_key=request.provider_key or 'auto',
+        )
+    except AllProvidersUnavailable as _ape:
+        # Phase 5: surface 503 instead of DEMO canned text
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": ("All AI providers are currently unavailable (rate-limited). "
+                          "Please retry in a few minutes."),
+                "providers_tried": _ape.tried,
+                "session_id": request.session_id,
+            }
+        )
     elapsed_ms = round((time() - t0) * 1000)
     save_conversation(request.session_id, request.user_query, response)
 
@@ -567,6 +797,9 @@ async def chat(request: ConversationMessage):
         "tool_calls": response.get("tool_calls", []),
         "timestamp": response.get("timestamp"),
         "model": response.get("model"),
+        "routed_sheet": routed_sheet,
+        "router_reason": router_reason,
+        "router_tier": router_tier,
     })
 
 @app.get("/api/documents")
@@ -864,14 +1097,25 @@ def queue_document_processing(doc_id: str, file_path: str, file_type: str, compa
             # blow the context budget while a 1-2 sheet file still gets a generous preview.
             rows_per_sheet = max(5, min(100, 800 // max(len(all_sheets), 1)))
 
+            # Phase 1: build per-sheet CSV strings AND the legacy combined blob.
+            # Per-sheet strings allow O(1) lookup in _enrich_doc without regex,
+            # and each can be independently capped at the per-provider char limit.
+            parsed_sheets: dict = {}
             sheet_sections = []
             for name, df in all_sheets.items():
                 header = f"=== Sheet: {name} ({len(df)} rows x {len(df.columns)} cols) ==="
                 cols_line = f"Columns: {', '.join(str(c) for c in df.columns)}"
-                csv_body = df.head(rows_per_sheet).to_csv(index=False)
-                sheet_sections.append(f"{header}\n{cols_line}\n{csv_body}")
+                is_data_empty = len(df) == 0 or df.dropna(how='all').shape[0] == 0
+                if is_data_empty:
+                    csv_body = "(no data rows — headers only or empty sheet)\n"
+                else:
+                    csv_body = df.head(rows_per_sheet).to_csv(index=False)
+                section = f"{header}\n{cols_line}\n{csv_body}"
+                parsed_sheets[name] = section
+                sheet_sections.append(section)
             csv_preview = "\n\n".join(sheet_sections)
 
+            DOCUMENT_STORE[doc_id]["parsed_sheets"] = parsed_sheets
             DOCUMENT_STORE[doc_id]["parsed_csv"] = csv_preview
             DOCUMENT_STORE[doc_id]["row_count"] = total_rows
             # Store per-sheet column lists so _enrich_doc can resolve columns for

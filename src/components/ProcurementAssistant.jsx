@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, Fragment } from 'react';
 import {
   Send,
   Upload,
@@ -29,6 +29,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
   const [downloadingInsights, setDownloadingInsights] = useState(false);
+  const [providerError, setProviderError] = useState(null); // {message, providersTried, retryFn}
   const [selectedModel, setSelectedModel] = useState(
     () => localStorage.getItem('procure_ai_model_key') || 'model_a'
   );
@@ -108,6 +109,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
       };
 
       const response = await sendChat({ sessionId, userQuery: userText, context, modelKey: forceModelKey || selectedModel, providerKey: selectedProvider });
+      setProviderError(null);
       const assistantText = Array.isArray(response.response)
         ? response.response
             .map((block) => (typeof block === 'string' ? block : block.text || JSON.stringify(block)))
@@ -121,6 +123,8 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
           type: 'assistant',
           text: assistantText,
           model: response.model,
+          routed_sheet: response.routed_sheet || null,
+          router_tier: response.router_tier || null,
         },
       ]);
 
@@ -129,14 +133,25 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
         saveChatMessage(user.uid, sessionId, 'assistant', assistantText).catch(() => {});
       }
     } catch (error) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now() + 1,
-          type: 'assistant',
-          text: `Error: ${error.message}`,
-        },
-      ]);
+      if (error.status === 503) {
+        // Phase 5/6: show structured error banner, not an assistant message
+        setProviderError({
+          message: error.message,
+          providersTried: error.providers_tried || [],
+          retryFn: () => handleSendMessage(userText, forceModelKey),
+        });
+        // Remove the user message we just added (it will be re-sent on retry)
+        setMessages((prev) => prev.filter((m) => m.id !== newMessage.id));
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Date.now() + 1,
+            type: 'assistant',
+            text: `Error: ${error.message}`,
+          },
+        ]);
+      }
     } finally {
       setAnalyzing(false);
     }
@@ -498,6 +513,13 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
             </span>
           ) : null;
         })()}
+        {msg.type === 'assistant' && msg.routed_sheet && (
+          <div className="mb-2">
+            <span className="inline-flex items-center gap-1 text-[10px] font-medium text-slate-500 bg-slate-200 px-2 py-0.5 rounded-full">
+              {msg.routed_sheet === '__ALL__' ? '📚 All sheets (summary)' : `📄 Sheet: ${msg.routed_sheet}`}
+            </span>
+          </div>
+        )}
         {msg.type === 'user' ? (
           <p className="text-sm leading-relaxed">{msg.text}</p>
         ) : (
@@ -586,6 +608,35 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
         </div>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
+          {/* Phase 5/6: 503 provider error banner */}
+          {providerError && (
+            <div className="flex items-start gap-3 bg-red-50 border border-red-200 rounded-xl px-4 py-3 mb-2">
+              <span className="text-red-500 mt-0.5">⚠️</span>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-red-800">{providerError.message}</p>
+                {providerError.providersTried?.length > 0 && (
+                  <p className="text-xs text-red-600 mt-0.5">
+                    Tried: {providerError.providersTried.join(', ')}
+                  </p>
+                )}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => { setProviderError(null); providerError.retryFn(); }}
+                  className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-red-100 hover:bg-red-200 text-red-800 transition"
+                >
+                  Retry
+                </button>
+                <button
+                  onClick={() => setProviderError(null)}
+                  className="text-red-400 hover:text-red-600 transition"
+                  aria-label="Dismiss"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+          )}
           {messages.map((msg) => (
             <MessageBubble key={msg.id} msg={msg} />
           ))}
