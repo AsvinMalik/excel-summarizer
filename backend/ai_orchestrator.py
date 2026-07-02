@@ -18,8 +18,6 @@ from ai_providers.model_presets import (
     cerebras_provider as _cerebras,
     openrouter_provider as _openrouter,
     demo_provider as _demo,
-    gemini_provider as _gemini,
-    openai_provider as _openai,
 )
 
 os.makedirs(os.path.join(os.path.dirname(__file__), 'logs'), exist_ok=True)
@@ -131,29 +129,9 @@ def _call_pinned(messages, max_tokens, model_key) -> MockResponse:
 def _call_chain(messages, max_tokens) -> MockResponse:
     """Run the full provider chain; last resort is Demo mode.
 
-    Chain order (Phase 5b): frontier tier (Gemini/OpenAI, if configured) →
-    fast cloud tier (Cerebras → Groq → Phi3) → OpenRouter extra chance → Demo.
-    Frontier providers are tried first when configured — they have the largest
-    context windows and highest reasoning quality.
+    Chain order: Cerebras → Groq → Phi3 → OpenRouter → Demo.
     """
     last_error = None
-
-    # Phase 5b: frontier tier first when configured
-    for frontier in (_gemini, _openai):
-        if not frontier.is_configured:
-            continue
-        start = time.monotonic()
-        try:
-            text = frontier.complete(messages, max_tokens)
-            if not text:
-                raise RuntimeError('empty response')
-            elapsed = time.monotonic() - start
-            logger.info('provider=%s level=0 status=success elapsed=%.2fs (frontier)', frontier.name, elapsed)
-            return MockResponse(text, frontier.name)
-        except Exception as e:
-            elapsed = time.monotonic() - start
-            last_error = e
-            logger.warning('provider=%s level=0 status=failed elapsed=%.2fs error=%s (frontier)', frontier.name, elapsed, e)
 
     for level, provider in enumerate(_CHAIN, start=1):
         if not provider.is_configured:

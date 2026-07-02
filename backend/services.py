@@ -930,9 +930,12 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
         try:
             from model_b_agent import model_b_agent as _model_b
             mb_result = _model_b(user_query, document_context, session_state, provider_key=provider_key)
-            # Model B returns a dict; only propagate if it produced a real answer
-            mb_text = (mb_result or {}).get('answer', '')
-            if mb_text and not mb_text.startswith('[Model B error') and 'failed' not in mb_text[:80].lower():
+            # model_b_agent returns {'content': [{'type': 'text', 'text': ...}], ...}
+            mb_content = (mb_result or {}).get('content') or []
+            mb_text = mb_content[0].get('text', '') if mb_content else ''
+            # Redirect responses (model_b_redirect) mean B can't handle it — fall through
+            redirect = (mb_result or {}).get('model', '') == 'model_b_redirect'
+            if mb_text and not redirect and 'failed' not in mb_text[:80].lower():
                 return {**mb_result, 'model': 'model-b-auto-fallback'}
             model_b_fallback_failed = True
         except Exception:

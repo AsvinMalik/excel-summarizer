@@ -20,41 +20,6 @@ from ai_providers.phi3_provider import Phi3Provider
 from ai_providers.cerebras_provider import CerebrasProvider
 from ai_providers.demo_provider import DemoProvider
 from openrouter_client import OpenRouterProvider
-import gemini_client as _gemini_client
-import openai_client as _openai_client
-
-
-class GeminiProvider:
-    """Phase 5b frontier tier — wraps gemini_client.py (custom API route)."""
-    name = 'GEMINI'
-
-    @property
-    def is_configured(self) -> bool:
-        return bool(os.getenv('GEMINI_API_KEY'))
-
-    def complete(self, messages, max_tokens: int = 1500, model_name: str = None) -> str:
-        resp = _gemini_client.create_chat_completion(messages, max_tokens)
-        text = resp.choices[0].message.content
-        if '[DEMO MODE]' in text or '[API Error' in text:
-            raise RuntimeError(text)
-        return text
-
-
-class OpenAIProvider:
-    """Phase 5b frontier tier — wraps openai_client.py (custom API route)."""
-    name = 'OPENAI'
-
-    @property
-    def is_configured(self) -> bool:
-        return bool(os.getenv('OPENAI_API_KEY'))
-
-    def complete(self, messages, max_tokens: int = 1500, model_name: str = None) -> str:
-        resp = _openai_client.create_chat_completion(messages, max_tokens)
-        text = resp.choices[0].message.content
-        if '[DEMO MODE]' in text or '[API Error' in text:
-            raise RuntimeError(text)
-        return text
-
 
 # One instance per provider — shared with the orchestrator's fallback chain so there's
 # no duplicate state (connection pools, lazy is_configured checks, etc.).
@@ -63,8 +28,6 @@ phi3_provider = Phi3Provider()
 cerebras_provider = CerebrasProvider()
 openrouter_provider = OpenRouterProvider()
 demo_provider = DemoProvider()
-gemini_provider = GeminiProvider()
-openai_provider = OpenAIProvider()
 
 # model_key -> {'provider': <instance>, 'model': <optional model-name override or None>}
 # 'model': None means use each provider's own default model (from its env var).
@@ -73,6 +36,4 @@ PRESET_REGISTRY = {
     'groq':       {'provider': groq_provider,       'model': None},
     'cerebras':   {'provider': cerebras_provider,   'model': None},
     'openrouter': {'provider': openrouter_provider, 'model': None},
-    'gemini':     {'provider': gemini_provider,     'model': None},
-    'openai':     {'provider': openai_provider,     'model': None},
 }
