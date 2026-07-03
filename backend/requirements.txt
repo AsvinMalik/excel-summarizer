@@ -5,10 +5,10 @@ python-multipart
 starlette
 python-dotenv
 openai
-google-generativeai
 groq
 cerebras_cloud_sdk
 requests
 pandas
+numpy
 openpyxl
 reportlab

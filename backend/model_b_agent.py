@@ -152,7 +152,11 @@ def _format_result(value: Any) -> str:
     if isinstance(value, (int, float)):
         if value != value:  # NaN
             return 'No result (NaN).'
-        return f'**{value:,.4g}**'
+        # Thousands separators, never scientific notation ('{:,.4g}' rendered
+        # 516,367,254.97 as the unreadable '5.164e+08')
+        if isinstance(value, int) or value == int(value):
+            return f'**{int(value):,}**'
+        return f'**{value:,.2f}**'
 
     # pandas Series → convert to two-column DataFrame for table rendering
     if isinstance(value, pd.Series):
@@ -302,7 +306,12 @@ def model_b_agent(
         out = _run_sandbox(fixed_code, all_sheets)
 
         if out.get('error'):
-            return _wrap('model_b_redirect', 'Ask **Model A** for this.')
+            return _wrap('model_b_redirect', (
+                "I couldn't compute this from your data — the generated code failed "
+                "twice in the sandbox, so I'm not going to guess. Try **Model A** "
+                "(or **Pearl Pro**) for this question, or a faster cloud provider: "
+                "code generation on the local model is less reliable."
+            ))
 
     text = _format_result(out.get('result'))
     return _wrap('MODEL_B', text)
