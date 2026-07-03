@@ -9,7 +9,12 @@
  *             it directly against the uploaded data. No preview, no hallucination risk —
  *             the code execution is the ground truth.
  *
- * To rename or reconfigure either preset, edit this file only.
+ * PEARL_PRO — The combined flagship: Model A's grounded, deterministic-first pipeline
+ *             for every question, plus whole-workbook map-reduce synthesis (formerly
+ *             Model C) for summary questions, and cached per-sheet summaries injected
+ *             into every answer for cross-sheet awareness.
+ *
+ * To rename or reconfigure a preset, edit this file only.
  */
 export const MODEL_OPTIONS = [
   {
@@ -23,8 +28,8 @@ export const MODEL_OPTIONS = [
     desc: 'Pandas sandbox — AI generates & runs code on your actual data',
   },
   {
-    value: 'model_c',
-    label: 'Model C · Pearl Pro',
-    desc: 'Whole-workbook map-reduce — synthesises every sheet for every query',
+    value: 'pearl_pro',
+    label: 'Pearl Pro',
+    desc: 'Ultimate — grounded analysis + whole-workbook synthesis in one pipeline',
   },
 ];

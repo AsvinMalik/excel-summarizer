@@ -345,9 +345,15 @@ app = FastAPI(title="Procure.ai Backend")
 _default_origins = ["http://localhost:4173", "http://localhost:3000"]
 _extra_origins = [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()]
 
+# Accept localhost, 127.0.0.1, and LAN IPs on any port for local dev/demo, so the
+# browser origin (e.g. 127.0.0.1:4173 or a Network URL vite advertises) is never
+# rejected when the bundle calls the backend on a sibling host/port.
+_local_origin_regex = r"^http://(localhost|127\.0\.0\.1|(\d{1,3}\.){3}\d{1,3})(:\d+)?$"
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_default_origins + _extra_origins,
+    allow_origin_regex=_local_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -562,6 +568,9 @@ def _enrich_doc(doc: dict, provider_key: str = 'auto') -> dict:
         'full_profile': stored.get('profile'),
         'full_statistics': stored.get('statistics'),
         'full_unified_schema': stored.get('unified_schema'),
+        # Phase 4 map cache (sheet_name → {summary, model, ts}). Pearl Pro injects
+        # these cached mini-summaries as cross-sheet context at zero LLM cost.
+        'sheet_summaries': stored.get('sheet_summaries'),
         # Server-local path, never echoed back in any API response — used internally so
         # the query engine can re-read the FULL workbook on demand instead of operating
         # on the (possibly truncated) text preview.
@@ -714,14 +723,85 @@ async def chat(request: ConversationMessage):
     router_reason: str = ''
     router_tier: str = ''
 
-    # Only route if the user hasn't manually picked a sheet
+    # ── Sheet-scope feature ───────────────────────────────────────────────
+    # sheet_scope (from the frontend Target control):
+    #   'sheet' — user pinned the previewed sheet: answer ONLY from it, skip router
+    #   'all'   — user wants the whole workbook considered; summary-style
+    #             questions map-reduce, everything else gets full context
+    #   'auto'  — router decides per question (any incidental preview
+    #             selection is ignored so the router actually runs)
+    #   missing — legacy client: old behavior (respect active_sheet if sent)
     _whole_file_summary: dict | None = None
-    if active_doc_ctx.get('doc_id') and not active_doc_ctx.get('active_sheet'):
-        doc_id = active_doc_ctx['doc_id']
-        stored = DOCUMENT_STORE.get(doc_id)
-        if stored and stored.get('sheet_names'):
+    sheet_scope = (active_doc_ctx.get('sheet_scope') or '').lower()
+    doc_id = active_doc_ctx.get('doc_id')
+    stored = DOCUMENT_STORE.get(doc_id) if doc_id else None
+
+    # Structural questions ("how many sheets", "list the sheets") have an exact
+    # deterministic answer in procure_agent — never let the router's Tier-2 LLM
+    # reinterpret them as whole-file summary intent (observed: "How many sheets
+    # does this file have?" → __ALL__ → a full map-reduce summary instead of "30").
+    # Pinned scope is excluded: there active_sheet must survive to procure_agent
+    # so row-count questions answer for the pinned sheet.
+    _is_structural = False
+    if stored and sheet_scope != 'sheet':
+        try:
+            from services import _try_answer_structural_question as _tasq
+            _is_structural = bool(_tasq(request.user_query, {'active_document': {
+                'name': active_doc_ctx.get('name') or stored.get('filename'),
+                'sheet_names': stored.get('sheet_names'),
+                'row_count': stored.get('row_count'),
+            }}))
+        except Exception:
+            _is_structural = False
+
+    if sheet_scope == 'sheet' and active_doc_ctx.get('active_sheet'):
+        routed_sheet = active_doc_ctx['active_sheet']
+        router_reason = 'user pinned the preview sheet'
+        router_tier = 'user'
+        active_doc_ctx['scope_instruction'] = (
+            f"The user has explicitly scoped this conversation to the sheet "
+            f"\"{routed_sheet}\" they are previewing. Work ONLY with this "
+            f"sheet's data; do not reference other sheets unless asked."
+        )
+        ctx['active_document'] = active_doc_ctx
+
+    elif sheet_scope == 'all' and stored:
+        # Whole-workbook mode: never narrow to one sheet.
+        active_doc_ctx.pop('active_sheet', None)
+        active_doc_ctx['scope_instruction'] = (
+            "The user has explicitly chosen to work with ALL sheets of this "
+            "workbook. Consider every sheet when answering; cite which "
+            "sheet(s) each fact comes from."
+        )
+        ctx['active_document'] = active_doc_ctx
+        routed_sheet = '__ALL__'
+        router_tier = 'user'
+        router_reason = 'user selected All sheets (full context)'
+        if not _is_structural:
             try:
-                route = _route_question(request.user_query, stored)
+                route = _route_question(request.user_query, stored,
+                                        provider_key=request.provider_key or 'auto')
+                if route.get('sheets', [None])[0] == '__ALL__':
+                    # summary-style question → map-reduce path
+                    _whole_file_summary = summarize_workbook(
+                        doc_id, provider_key=request.provider_key or 'auto')
+                    router_reason = 'user selected All sheets (summary intent)'
+            except Exception as _re:
+                logger.warning(f'Sheet router failed in all-scope: {_re}')
+
+    elif doc_id and stored and stored.get('sheet_names') and (
+            sheet_scope == 'auto' or not active_doc_ctx.get('active_sheet')):
+        # Auto mode: ignore any incidental preview selection — routing is
+        # decided per question. (Without this, the preview panel's default
+        # first-sheet selection silently bypasses the router on every chat.)
+        active_doc_ctx.pop('active_sheet', None)
+        if _is_structural:
+            router_tier = 'structural'
+            router_reason = 'structural question — deterministic answer, router skipped'
+        else:
+            try:
+                route = _route_question(request.user_query, stored,
+                                        provider_key=request.provider_key or 'auto')
                 sheets = route.get('sheets', [])
                 router_reason = route.get('reason', '')
                 router_tier = route.get('tier', '')
@@ -737,16 +817,59 @@ async def chat(request: ConversationMessage):
             except Exception as _re:
                 logger.warning(f'Sheet router failed: {_re}')
 
-    # Phase 4 short-circuit: return map-reduce summary directly
+    # Phase 4 short-circuit: return map-reduce summary directly.
+    # Present the per-sheet breakdown (every sheet with real content) followed by
+    # the combined overview — not just the overview, since the user asked to
+    # summarise each sheet.
     if _whole_file_summary:
+        def _trim_partial_sentence(text: str) -> str:
+            """Drop a trailing incomplete sentence — mini-summaries are generated
+            under a hard max_tokens cap, so the last one can end mid-word. Only
+            trims when a real sentence boundary exists in the final stretch."""
+            t = text.rstrip()
+            if not t or t.endswith(('.', '!', '?', ':', '_', '*', ')')):
+                return t
+            cut = max(t.rfind('. '), t.rfind('.\n'), t.rfind('! '), t.rfind('? '))
+            return t[:cut + 1] if cut > len(t) * 0.5 else t
+
         combined = _whole_file_summary.get('__combined__', {})
-        combined_text = combined.get('summary', 'Summary unavailable.')
+        combined_text = _trim_partial_sentence(combined.get('summary', 'Summary unavailable.'))
+
+        # Preserve workbook sheet order for the per-sheet section
+        _stored = DOCUMENT_STORE.get(active_doc_ctx.get('doc_id'), {})
+        _sheet_order = _stored.get('sheet_names') or [
+            k for k in _whole_file_summary.keys() if k != '__combined__'
+        ]
+
+        sheet_lines = []
+        skipped_empty = 0
+        for sn in _sheet_order:
+            entry = _whole_file_summary.get(sn)
+            if not entry:
+                continue
+            # Skip template/empty sheets — the user only wants sheets with content
+            if entry.get('model') == 'hardcoded':
+                skipped_empty += 1
+                continue
+            summ = _trim_partial_sentence((entry.get('summary') or '').strip())
+            if not summ:
+                continue
+            sheet_lines.append(f"**Sheet {sn}**\n{summ}")
+
+        parts = [f"## Workbook summary — {active_doc_ctx.get('name', 'file')}", combined_text]
+        if sheet_lines:
+            parts.append("### Sheet-by-sheet\n\n" + "\n\n".join(sheet_lines))
+        if skipped_empty:
+            parts.append(f"_Skipped {skipped_empty} empty/template sheet(s) with no data._")
+        full_text = "\n\n".join(parts)
+
         return JSONResponse({
             "session_id": request.session_id,
-            "response": [{"type": "text", "text": combined_text}],
+            "response": [{"type": "text", "text": full_text}],
             "tool_calls": [],
             "timestamp": None,
             "model": combined.get('model', 'map-reduce'),
+            "pipeline": request.model_key or 'model_a',
             "routed_sheet": "__ALL__",
             "router_reason": router_reason,
             "router_tier": router_tier,
@@ -797,6 +920,7 @@ async def chat(request: ConversationMessage):
         "tool_calls": response.get("tool_calls", []),
         "timestamp": response.get("timestamp"),
         "model": response.get("model"),
+        "pipeline": request.model_key or 'model_a',
         "routed_sheet": routed_sheet,
         "router_reason": router_reason,
         "router_tier": router_tier,
@@ -810,12 +934,25 @@ async def list_documents(user_id: str):
         "count": len(docs),
     })
 
+def _json_safe(value):
+    """Recursively replace NaN/Infinity floats with None so Starlette's JSONResponse
+    (which serialises with allow_nan=False) doesn't 500 on stats containing NaN."""
+    import math as _math
+    if isinstance(value, float):
+        return value if _math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
 @app.get("/api/document/{doc_id}")
 async def get_document(doc_id: str):
     doc = retrieve_document(doc_id)
     # bytes/parsed_csv_full are not JSON-serialisable — strip them before responding
     safe = {k: v for k, v in doc.items() if not isinstance(v, (bytes, bytearray))}
-    return JSONResponse(safe)
+    return JSONResponse(_json_safe(safe))
 
 
 @app.get("/api/document/{doc_id}/sheets")

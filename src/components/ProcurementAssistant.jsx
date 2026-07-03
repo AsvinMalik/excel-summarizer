@@ -30,14 +30,25 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
   const [analyzing, setAnalyzing] = useState(false);
   const [downloadingInsights, setDownloadingInsights] = useState(false);
   const [providerError, setProviderError] = useState(null); // {message, providersTried, retryFn}
-  const [selectedModel, setSelectedModel] = useState(
-    () => localStorage.getItem('procure_ai_model_key') || 'model_a'
-  );
+  const [selectedModel, setSelectedModel] = useState(() => {
+    // Guard against removed presets lingering in localStorage (e.g. 'model_c')
+    const stored = localStorage.getItem('procure_ai_model_key');
+    return MODEL_OPTIONS.some((m) => m.value === stored) ? stored : 'model_a';
+  });
   const [selectedProvider, setSelectedProvider] = useState(
     () => localStorage.getItem('procure_ai_provider_key') || 'auto'
   );
   const [selectorOpen, setSelectorOpen] = useState(false);
   const selectorRef = useRef(null);
+  // Target-sheet scope: 'auto' (router decides) | 'all' (whole workbook)
+  // | 'sheet' (the sheet currently selected in the preview panel)
+  const [sheetScope, setSheetScope] = useState(
+    () => localStorage.getItem('procure_ai_sheet_scope') || 'auto'
+  );
+  const handleScopeSelect = (scope) => {
+    setSheetScope(scope);
+    localStorage.setItem('procure_ai_sheet_scope', scope);
+  };
   const { user, logout } = useAuth();
   const messagesEnd = useRef(null);
 
@@ -102,7 +113,10 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
               name: activeDocumentObj.name,
               type: activeDocumentObj.type,
               status: activeDocumentObj.status,
-              active_sheet: activeSheet || undefined,
+              sheet_scope: sheetScope,
+              // active_sheet only matters when the user pinned the preview
+              // sheet — in auto/all modes the backend decides the scope.
+              active_sheet: sheetScope === 'sheet' ? (activeSheet || undefined) : undefined,
             }
           : null,
         documents: documents.map((doc) => ({ doc_id: doc.doc_id, id: doc.id, name: doc.name, type: doc.type, status: doc.status })),
@@ -282,21 +296,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
       text: 'text-blue-900',
       buildPrompt: (activeDocument) => {
         const docRef = activeDocument ? `"${activeDocument.name}"` : 'the uploaded workbook';
-        return (
-          `Summarize ${docRef} sheet by sheet.\n\n` +
-          `For each sheet that contains real, filled-in data, write a section with:\n` +
-          `**## [Sheet Name]**\n` +
-          `- **Purpose** — what this sheet tracks (one sentence)\n` +
-          `- **Key figures** — the most important totals, averages, or metrics; use the exact numbers from the computed statistics provided in your context\n` +
-          `- **Top entries** — the top 3–5 rows or items if the sheet has rankings or customer/vendor breakdowns (e.g. top customers by revenue, highest cost line)\n` +
-          `- **Notable insights** — year-on-year changes, variances, trends, or anomalies worth flagging\n\n` +
-          `Rules:\n` +
-          `- Skip any sheet that is empty, has no filled numeric or text data, or is purely a visual/formatting template\n` +
-          `- Skip sheets where all values are blank or dashes\n` +
-          `- Do not make up figures — only cite numbers that appear in the computed statistics context\n` +
-          `- Keep each sheet section concise (4–8 bullet points max)\n` +
-          `- If a column or value is in Indian number format (Lakhs, Crores), say so clearly`
-        );
+        return `Summarize ${docRef} sheet by sheet.`;
       },
     },
     {
@@ -308,13 +308,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
       text: 'text-amber-900',
       buildPrompt: (activeDocument) => {
         const target = activeDocument ? `"${activeDocument.name}"` : 'the uploaded document(s)';
-        return (
-          `Extract the most important structured information from ${target}. First identify what kind of document this actually is, then extract whatever is most relevant to it: ` +
-          'if it contains contract language, pull out the material clauses (payment terms, termination, indemnity, liability, SLA, renewal, and any other clause that matters here — not limited to a fixed list); ' +
-          'if it is a data sheet, invoice, PO, or vendor register, pull out the key fields, notable entries, totals, and any anomalies or outliers; ' +
-          'if it is something else entirely, extract whatever the most important structured facts in it are. ' +
-          'Base everything strictly on what is actually in the document — do not assume it is a contract.'
-        );
+        return `Extract the key structured information from ${target}.`;
       },
     },
     {
@@ -338,8 +332,8 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
       text: 'text-purple-900',
       buildPrompt: (activeDocument) =>
         activeDocument
-          ? `Build an executive report summarizing spend, risk, and vendor performance based on "${activeDocument.name}".`
-          : 'Build an executive procurement report summarizing spend, risk, and vendor performance.',
+          ? `Build a report of each sheet in "${activeDocument.name}".`
+          : 'Build a report of each sheet in the uploaded workbook.',
     },
   ];
 
@@ -475,7 +469,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
   const MODEL_BADGE = {
     MODEL_B:           { label: 'Model B · Sandbox',  color: 'bg-violet-100 text-violet-700' },
     model_b_redirect:  { label: 'Model B → Model A',  color: 'bg-amber-100 text-amber-700' },
-    map_reduce:        { label: 'Model C · Pearl Pro', color: 'bg-emerald-100 text-emerald-700' },
+    map_reduce:        { label: 'Pearl Pro · Map-Reduce', color: 'bg-emerald-100 text-emerald-700' },
     PHI3_LOCAL:   { label: 'Phi3 · Local',      color: 'bg-emerald-100 text-emerald-700' },
     GROQ:         { label: 'Groq · Llama 3.3',  color: 'bg-purple-100 text-purple-700' },
     CEREBRAS:     { label: 'Cerebras',           color: 'bg-orange-100 text-orange-700' },
@@ -656,6 +650,44 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
         <div className="border-t border-gray-200 bg-white px-6 pt-4 pb-3">
           <QuickActions />
 
+          {/* Target-sheet scope control */}
+          {activeDocument && (
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Target</span>
+              <div className="flex gap-1">
+                {[
+                  { value: 'auto', label: 'Auto', title: 'AI picks the right sheet for each question' },
+                  { value: 'all', label: 'All sheets', title: 'Work with the entire workbook' },
+                  {
+                    value: 'sheet',
+                    label: activeSheet ? `Preview: ${activeSheet}` : 'Preview sheet',
+                    title: 'Work only with the sheet selected in the preview panel',
+                  },
+                ].map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    title={opt.title}
+                    onClick={() => handleScopeSelect(opt.value)}
+                    disabled={opt.value === 'sheet' && !activeSheet}
+                    className={`px-2.5 py-1 text-[11px] font-semibold rounded-full border transition whitespace-nowrap ${
+                      sheetScope === opt.value
+                        ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                        : 'bg-white text-gray-500 border-gray-200 hover:border-blue-300 hover:text-blue-600'
+                    } disabled:opacity-40 disabled:cursor-not-allowed`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              <span className="text-[10px] text-gray-400 hidden md:inline">
+                {sheetScope === 'auto' && 'AI routes each question to the best sheet'}
+                {sheetScope === 'all' && 'Answers consider every sheet in the workbook'}
+                {sheetScope === 'sheet' && 'Answers use only the previewed sheet'}
+              </span>
+            </div>
+          )}
+
           {/* Input row */}
           <div className="flex gap-2 items-center">
             {/* Model selector trigger */}
@@ -666,7 +698,7 @@ const ProcurementAssistant = ({ documents, setDocuments, activeDoc, setActiveDoc
                 className="flex items-center gap-1.5 px-3 py-3 rounded-lg border border-gray-300 bg-white hover:border-blue-400 transition text-xs font-semibold text-gray-600 whitespace-nowrap"
                 title="Choose pipeline and API"
               >
-                <span className={`w-2 h-2 rounded-full ${selectedModel === 'model_b' ? 'bg-violet-500' : selectedModel === 'model_c' ? 'bg-emerald-500' : 'bg-blue-500'}`} />
+                <span className={`w-2 h-2 rounded-full ${selectedModel === 'model_b' ? 'bg-violet-500' : selectedModel === 'pearl_pro' ? 'bg-emerald-500' : 'bg-blue-500'}`} />
                 {MODEL_OPTIONS.find(m => m.value === selectedModel)?.label}
                 <span className="text-gray-400">·</span>
                 {PROVIDER_OPTIONS.find(p => p.value === selectedProvider)?.label}

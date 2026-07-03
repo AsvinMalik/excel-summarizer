@@ -204,6 +204,10 @@ def format_statistics_block(stats: dict) -> str:
     has_any_content = False
 
     for sheet_name, sheet_stats in stats.items():
+        # Defensive: only dict-shaped per-sheet stats are usable; a bool/None here
+        # means an upstream shape mismatch — skip rather than crash the whole request.
+        if not isinstance(sheet_stats, dict):
+            continue
         if sheet_stats.get('skipped'):
             continue
 

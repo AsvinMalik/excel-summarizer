@@ -5,6 +5,8 @@ column, operation, filters) — the actual computation always runs through real
 pandas, so it can never be arithmetically wrong the way free-text LLM reasoning
 can be.
 """
+import re
+
 import pandas as pd
 
 
@@ -16,13 +18,47 @@ _VALID_OPS = {'sum', 'mean', 'count', 'min', 'max', 'median'}
 _VALID_FILTER_OPS = {'>', '>=', '<', '<=', '==', '!='}
 
 
+def _norm_text(value) -> str:
+    """Normalise human-typed Excel text for matching: collapse runs of
+    whitespace ('Ajay  team' -> 'Ajay team'), strip edges, casefold.
+    Real MIS files are full of stray double spaces and trailing spaces,
+    so strict string equality silently returns zero rows."""
+    return re.sub(r'\s+', ' ', str(value)).strip().casefold()
+
+
+def _resolve_column(df: pd.DataFrame, column) -> str | None:
+    """Resolve a spec-provided column name against real df columns,
+    tolerating whitespace/case differences (e.g. spec 'From' vs header 'From ')."""
+    if column is None:
+        return None
+    if column in df.columns:
+        return column
+    wanted = _norm_text(column)
+    for c in df.columns:
+        if _norm_text(c) == wanted:
+            return c
+    return None
+
+
 def load_all_sheets(file_path: str) -> dict:
     import sys
     raw = pd.read_excel(file_path, sheet_name=None)
     # Late-import _clean_sheet_headers from main to avoid circular import.
-    # Always available in server context; falls back to raw sheets in test scripts.
-    _main = sys.modules.get('main')
-    clean = getattr(_main, '_clean_sheet_headers', None)
+    # Under pytest/imports the module is 'main'; when the server is started as
+    # `python main.py` it is registered as '__main__' instead — check both, or
+    # header cleaning silently never runs in production and spec columns
+    # (built from the cleaned profile) stop matching the loaded DataFrames.
+    clean = None
+    for _mod_name in ('main', '__main__'):
+        candidate = getattr(sys.modules.get(_mod_name), '_clean_sheet_headers', None)
+        if callable(candidate):
+            clean = candidate
+            break
+    if clean is None:
+        try:
+            from main import _clean_sheet_headers as clean
+        except ImportError:
+            pass
     if callable(clean):
         return {name: clean(df) for name, df in raw.items()}
     return raw
@@ -38,7 +74,8 @@ def _coerce_filter_value(raw_value):
 
 
 def _apply_filter(df: pd.DataFrame, column: str, op: str, raw_value) -> pd.DataFrame:
-    if column not in df.columns or op not in _VALID_FILTER_OPS:
+    column = _resolve_column(df, column)
+    if column is None or op not in _VALID_FILTER_OPS:
         return df
 
     numeric_series = pd.to_numeric(df[column], errors='coerce')
@@ -48,8 +85,10 @@ def _apply_filter(df: pd.DataFrame, column: str, op: str, raw_value) -> pd.DataF
         value = _coerce_filter_value(raw_value)
         compare_series = numeric_series
     else:
-        value = str(raw_value)
-        compare_series = df[column].astype(str)
+        # Text comparison: normalise both sides so stray double/trailing
+        # spaces and case differences don't turn a real match into 0 rows.
+        value = _norm_text(raw_value)
+        compare_series = df[column].astype(str).map(_norm_text)
 
     if op == '>':
         mask = compare_series > value
@@ -61,6 +100,11 @@ def _apply_filter(df: pd.DataFrame, column: str, op: str, raw_value) -> pd.DataF
         mask = compare_series <= value
     elif op == '==':
         mask = compare_series == value
+        # Fallback: exact (normalised) equality found nothing — try substring
+        # containment so 'Ajay' still matches 'Ajay/ Trupti'. Only for ==,
+        # never for numeric comparisons.
+        if not is_mostly_numeric and not mask.any() and value:
+            mask = compare_series.str.contains(re.escape(value), na=False)
     else:
         mask = compare_series != value
 
@@ -127,8 +171,8 @@ def execute_query_spec(all_sheets: dict, spec: dict) -> dict:
         df = _apply_filter(df, f.get('column'), f.get('op'), f.get('value'))
 
     matched_row_count = len(df)
-    group_by = spec.get('group_by')
-    column = spec.get('column')
+    group_by = _resolve_column(df, spec.get('group_by'))
+    column = _resolve_column(df, spec.get('column')) or spec.get('column')
     operation = spec.get('operation')
     operation = operation if operation in _VALID_OPS else None
 

@@ -37,6 +37,13 @@ def build_document_context_block(document_context: dict = None) -> str:
         return ''
 
     context_block = '\n\n[ACTIVE DOCUMENTS IN SESSION]\n'
+
+    # Sheet-scope feature: the user picked an explicit working scope in the UI
+    # (All sheets / Preview sheet). Surface it as a hard instruction so the
+    # model works with the data the way the user asked to.
+    scope_instruction = (active_document or {}).get('scope_instruction')
+    if scope_instruction:
+        context_block += f"\n[USER SCOPE INSTRUCTION] {scope_instruction}\n"
     for doc in documents:
         marker = ' (currently viewing)' if active_doc_id and doc.get('doc_id') == active_doc_id else ''
         context_block += f"\n- {doc.get('name', 'Unknown')}{marker}: type={doc.get('type', 'unknown')}, status={doc.get('status', 'unknown')}\n"
@@ -188,6 +195,20 @@ def _try_answer_structural_question(user_query: str, document_context: dict = No
             lines.append(f"I don't have parsed data for **{name}** right now — please re-upload it and ask again.")
             continue
 
+        # A pinned/routed sheet makes "how many rows" a per-sheet question, not a
+        # workbook-total one — answer from that sheet's profile. Takes precedence
+        # over the sheet-list branch because "this sheet" in a rows question
+        # otherwise trips mentions_sheets and returns the whole-workbook listing.
+        if asks_rows and not asks_names:
+            active_sheet = doc.get('active_sheet')
+            sheet_profile = (doc.get('profile') or {}).get(active_sheet) if active_sheet else None
+            if sheet_profile and sheet_profile.get('row_count') is not None:
+                lines.append(
+                    f"Sheet **\"{active_sheet}\"** of **{name}** has "
+                    f"**{sheet_profile['row_count']} rows** of data."
+                )
+                continue
+
         if asks_rows and not (asks_count and mentions_sheets) and not asks_names:
             lines.append(f"**{name}** has **{row_count} rows** total across all sheets.")
             continue
@@ -243,6 +264,20 @@ _DATA_QUERY_GATE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_TEXT_LOOKUP_GATE_RE = re.compile(
+    r'\b(?:associated\s+with|related\s+to|for|of|from|to|by)\b',
+    re.IGNORECASE,
+)
+_TEXT_LOOKUP_ENTITY_RE = re.compile(
+    r'\b(?:associated\s+with|related\s+to|for|of|from|to|by)\s+(?:the\s+)?(.+?)(?:[?.!,]|$)',
+    re.IGNORECASE,
+)
+_TEXT_LOOKUP_STOPWORDS = {
+    'tell', 'show', 'find', 'give', 'what', 'which', 'the', 'a', 'an',
+    'is', 'are', 'was', 'were', 'matter', 'associated', 'related', 'with',
+    'for', 'of', 'from', 'to', 'by', 'team',
+}
+
 # Weaker local models (Phi3) are inconsistent at filling every spec field correctly
 # in one shot — e.g. dropping "sort" on a "top N" question, or inventing a spurious
 # filter on a plain group-by question. Rather than trust the model's JSON blindly,
@@ -273,6 +308,163 @@ def _find_column_for_term(term: str, columns: list) -> Optional[str]:
         if term == col_lower or term in col_lower or col_lower in term:
             return col
     return None
+
+
+def _norm_lookup_text(value) -> str:
+    return re.sub(r'\s+', ' ', str(value)).strip().casefold()
+
+
+def _column_query_score(column: str, query_lower: str) -> int:
+    col_norm = _norm_lookup_text(column)
+    if not col_norm or col_norm.startswith('col_'):
+        return 0
+    if col_norm in query_lower:
+        return len(col_norm) + 20
+    tokens = [
+        t for t in re.findall(r'[a-z0-9]+', col_norm)
+        if len(t) > 1 and t not in _TEXT_LOOKUP_STOPWORDS
+    ]
+    if tokens and all(re.search(r'\b' + re.escape(t) + r'\b', query_lower) for t in tokens):
+        return sum(len(t) for t in tokens)
+    return 0
+
+
+def _best_lookup_column(user_query: str, columns: list) -> Optional[str]:
+    query_lower = _norm_lookup_text(user_query)
+    scored = [(col, _column_query_score(col, query_lower)) for col in columns]
+    scored = [(col, score) for col, score in scored if score > 0]
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (item[1], len(str(item[0]))), reverse=True)
+    return scored[0][0]
+
+
+def _lookup_entity_terms(user_query: str) -> list:
+    match = _TEXT_LOOKUP_ENTITY_RE.search(user_query)
+    if not match:
+        return []
+    raw = re.sub(r'\b(?:team|group|person|vendor|party)\b', '', match.group(1), flags=re.IGNORECASE)
+    raw = re.sub(r'\s+', ' ', raw).strip(' "\'')
+    terms = []
+    for candidate in (match.group(1), raw):
+        norm = _norm_lookup_text(candidate)
+        if norm and norm not in terms:
+            terms.append(norm)
+    first_word = raw.split()[0] if raw else ''
+    if len(first_word) > 2:
+        norm_first = _norm_lookup_text(first_word)
+        if norm_first not in terms:
+            terms.append(norm_first)
+    return terms
+
+
+def _row_matches_entity(row, search_columns: list, entity_terms: list) -> bool:
+    for col in search_columns:
+        cell = _norm_lookup_text(row.get(col, ''))
+        if not cell or cell == 'nan':
+            continue
+        if any(term and term in cell for term in entity_terms):
+            return True
+    return False
+
+
+def _format_text_lookup_result(entity_label: str, target_column: str, matches: list) -> str:
+    if not matches:
+        return (
+            f'I checked the full workbook data and found no row matching "{entity_label}" '
+            f'with a "{target_column}" value.'
+        )
+
+    lines = [f'**{target_column} for {entity_label}**']
+    for match in matches[:10]:
+        row = match['row']
+        sheet = match['sheet']
+        target_value = row.get(target_column, '')
+        context_bits = []
+        for col in ('Date', 'From', 'To', 'Comments'):
+            if col in row and str(row.get(col, '')).strip() not in ('', 'nan', 'NaT'):
+                context_bits.append(f'{col}: {row.get(col)}')
+        prefix = f'Sheet "{sheet}"'
+        if context_bits:
+            prefix += ' | ' + ' | '.join(context_bits)
+        lines.append(f'- {prefix} | {target_column}: {target_value}')
+    if len(matches) > 10:
+        lines.append(f'_Showing 10 of {len(matches)} matching row(s), computed from the full workbook._')
+    else:
+        lines.append(f'_Computed directly from the full workbook: {len(matches)} matching row(s)._')
+    return '\n'.join(lines)
+
+
+def _try_answer_text_lookup(user_query: str, document_context: dict = None) -> Optional[str]:
+    if not _TEXT_LOOKUP_GATE_RE.search(user_query):
+        return None
+
+    entity_terms = _lookup_entity_terms(user_query)
+    if not entity_terms:
+        return None
+
+    # Sanity-check the extracted "entity": prepositions like of/for/in appear in
+    # almost every sentence, so the capture is often not a row entity at all but
+    # the rest of the sentence ("each sheet in mis automation pgil.xlsx").
+    # Reject captures that are file/sheet references or too long to be an entity
+    # name — otherwise this shortcut hijacks queries meant for the AI pipeline.
+    _primary = entity_terms[0]
+    _NON_ENTITY_RE = re.compile(
+        r'\b(?:sheet|sheets|tab|tabs|file|files|workbook|spreadsheet|document|'
+        r'report|xlsx|xls|csv|summary|overview)\b', re.IGNORECASE)
+    if (len(_primary) > 40 or len(_primary.split()) > 5
+            or _NON_ENTITY_RE.search(_primary)):
+        return None
+
+    documents = (document_context or {}).get('documents') or []
+    active_document = (document_context or {}).get('active_document')
+    target_docs = [
+        d for d in ([active_document] if active_document else documents)
+        if d and d.get('file_path') and d.get('profile')
+    ]
+    if not target_docs:
+        return None
+
+    doc = target_docs[0]
+    profile = doc.get('full_profile') or doc.get('profile') or {}
+    all_columns = [
+        c['name']
+        for sheet_profile in profile.values()
+        for c in sheet_profile.get('columns', [])
+        if isinstance(c, dict) and c.get('name')
+    ]
+    target_column = _best_lookup_column(user_query, all_columns)
+    if not target_column:
+        return None
+
+    try:
+        all_sheets = load_all_sheets(doc['file_path'])
+    except Exception:
+        return {'_engine_failed': True}
+
+    matches = []
+    for sheet_name, df in all_sheets.items():
+        if target_column not in df.columns:
+            continue
+        search_columns = [c for c in df.columns if c != target_column]
+        for _, row in df.iterrows():
+            target_value = row.get(target_column)
+            if str(target_value).strip() in ('', 'nan', 'NaT'):
+                continue
+            if _row_matches_entity(row, search_columns, entity_terms):
+                matches.append({
+                    'sheet': sheet_name,
+                    'row': {col: row.get(col) for col in df.columns},
+                })
+
+    # No matches: do NOT answer with a canned "no row found" — this shortcut is
+    # best-effort. A miss here usually means the query wasn't a row lookup at
+    # all, so fall through and let the normal AI pipeline handle it.
+    if not matches:
+        return None
+
+    entity_label = entity_terms[0]
+    return _format_text_lookup_result(entity_label, target_column, matches)
 
 
 def _apply_deterministic_overrides(user_query: str, spec: dict, columns: list, numeric_columns: list = None) -> dict:
@@ -324,6 +516,15 @@ def _apply_deterministic_overrides(user_query: str, spec: dict, columns: list, n
     # was actually meant; force it rather than let a wrong column through unnoticed.
     needs_numeric_column = spec.get('operation') in ('sum', 'mean', 'min', 'max', 'median')
     column_invalid = spec.get('column') and (spec['column'] not in numeric_columns or spec['column'] == spec.get('group_by'))
+    # But if the user's own words name the spec column explicitly, trust it even when
+    # the profile didn't type it numeric — MIS sheets are full of mixed-type columns
+    # that coerce fine at execution time, and forcing "the one numeric column" here
+    # would silently answer about a different column than the one the user asked for.
+    explicitly_named = bool(spec.get('column')) and spec.get('column') != spec.get('group_by') and (
+        _norm_lookup_text(spec['column']) in _norm_lookup_text(user_query)
+    )
+    if explicitly_named:
+        column_invalid = False
     if (needs_numeric_column and column_invalid) or (needs_numeric_column and not spec.get('column')):
         if len(numeric_columns) == 1:
             spec['column'] = numeric_columns[0]
@@ -445,7 +646,7 @@ def _format_query_result(spec: dict, result: dict) -> str:
     return '\n'.join(lines)
 
 
-def _try_answer_data_query(user_query: str, document_context: dict = None) -> Optional[str]:
+def _try_answer_data_query(user_query: str, document_context: dict = None, provider_key: str = 'auto') -> Optional[str]:
     if not _DATA_QUERY_GATE_RE.search(user_query):
         return None
 
@@ -522,15 +723,16 @@ def _try_answer_data_query(user_query: str, document_context: dict = None) -> Op
     )
 
     try:
-        # spec-generation always uses the default chain regardless of the caller's model_key —
-        # this is a structured JSON task (not a user-facing answer) and accuracy matters more
-        # than matching the user's preferred provider. Weak local models are unreliable here.
+        # Honor the user's provider selection even for spec generation — otherwise
+        # picking Phi3 in the UI still burns cloud quota on every data question.
+        # _apply_deterministic_overrides guards against weak-model spec mistakes.
         response = create_chat_completion(
             [
                 {'role': 'system', 'content': 'You translate data questions into structured pandas query specs. Output JSON only, nothing else.'},
                 {'role': 'user', 'content': spec_prompt},
             ],
             max_tokens=400,
+            model_key=provider_key,
         )
         spec = _extract_json(response.choices[0].message.content)
     except Exception:
@@ -540,6 +742,20 @@ def _try_answer_data_query(user_query: str, document_context: dict = None) -> Op
         spec = _try_build_spec_from_regex_only(user_query, sheet_column_map, numeric_sheet_column_map)
         if not spec:
             return None
+
+    # Clamp the spec's sheet to the sheets actually offered in the (scoped) schema.
+    # Weak models sometimes answer with a sheet that exists in the workbook but was
+    # NOT in the prompt (observed: scoped to '15.1', phi3 returned sheet 'Sheet1') —
+    # execute_query_spec would then silently run against the wrong sheet's data.
+    if spec.get('sheet') not in sheet_column_map:
+        wanted = _norm_lookup_text(spec.get('sheet') or '')
+        match = next((s for s in sheet_column_map if _norm_lookup_text(s) == wanted), None)
+        if match:
+            spec['sheet'] = match
+        elif len(sheet_column_map) == 1:
+            spec['sheet'] = next(iter(sheet_column_map))
+        else:
+            return {'_engine_failed': True}
 
     sheet_columns = list(sheet_column_map.get(spec.get('sheet'), []))
     numeric_columns = list(numeric_sheet_column_map.get(spec.get('sheet'), []))
@@ -605,8 +821,10 @@ def _build_sheet_content_block(sheet_name: str, sheet_profile: dict, sheet_stats
         suffix = f' … (+{len(col_names) - 25} more)' if len(col_names) > 25 else ''
         parts.append(f'Columns: {", ".join(shown)}{suffix}')
 
-    # Numeric column summaries from the pre-computed statistics block
-    stats_text = format_statistics_block(sheet_stats or {})
+    # Numeric column summaries from the pre-computed statistics block.
+    # format_statistics_block expects the multi-sheet map {sheet: stats}, so wrap
+    # this single sheet's stats under its name rather than passing the inner dict.
+    stats_text = format_statistics_block({sheet_name: sheet_stats} if sheet_stats else {})
     if stats_text:
         parts.append(stats_text[:1_200])  # cap per-sheet stats contribution
 
@@ -872,17 +1090,44 @@ def _build_full_context(document_context: Optional[dict]) -> Optional[dict]:
     return {**document_context, 'active_document': full_active}
 
 
+def _build_pearl_pro_summaries_block(document_context: dict = None, char_cap: int = 3000) -> str:
+    """PEARL PRO: format the Phase 4 map cache (per-sheet mini-summaries) as a
+    context block. Zero LLM calls — the cache was built by a prior whole-workbook
+    summary and persisted in the snapshot. Gives single/multi-hop answers Model C's
+    workbook-wide awareness without re-running map-reduce per question."""
+    summaries = (
+        ((document_context or {}).get('active_document') or {}).get('sheet_summaries') or {}
+    )
+    lines = []
+    for sheet_name, entry in summaries.items():
+        if sheet_name == '__combined__' or not isinstance(entry, dict):
+            continue
+        summ = (entry.get('summary') or '').strip()
+        if summ:
+            lines.append(f'[{sheet_name}] {summ}')
+    if not lines:
+        return ''
+    block = (
+        '[WORKBOOK-WIDE SHEET SUMMARIES] Cached one-paragraph summaries of every sheet '
+        'in this workbook, for cross-sheet awareness. The active sheet\'s full data is '
+        'in the blocks above; use these ONLY to reference what other sheets contain — '
+        'never to quote figures, which must come from the computed statistics blocks:\n'
+        + '\n'.join(lines)
+    )
+    return block[:char_cap]
+
+
 def procure_agent(user_query: str, document_context: dict = None, session_state: dict = None, model_key: str = 'model_a', provider_key: str = 'auto') -> dict:
     # MODEL_B: Pandas sandbox — LLM generates & executes code against real data.
     if model_key == 'model_b':
         from model_b_agent import model_b_agent
         return model_b_agent(user_query, document_context, session_state, provider_key=provider_key)
 
-    # MODEL_C (Pearl Pro): always use the whole-workbook map-reduce pipeline
-    # regardless of query phrasing. The user has explicitly asked for workbook-wide
-    # synthesis — skip the query classifier and the active-sheet scope entirely.
-    if model_key == 'model_c':
-        return _map_reduce_analysis(user_query, document_context, provider_key)
+    # PEARL PRO: the combined pipeline — Model A's grounded, deterministic-first
+    # path for every question, plus Model C's whole-workbook synthesis: summary
+    # questions map-reduce across every sheet (below), and non-summary questions
+    # get the cached per-sheet summaries injected for cross-sheet awareness.
+    is_pearl_pro = model_key in ('pearl_pro', 'model_c')  # model_c = legacy alias
 
     structural_answer = _try_answer_structural_question(user_query, document_context)
     if structural_answer:
@@ -912,11 +1157,18 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
     if query_type == 'multi_hop':
         document_context = _build_full_context(document_context)
 
-    data_query_result = _try_answer_data_query(user_query, document_context)
+    text_lookup_result = _try_answer_text_lookup(user_query, document_context)
+    if isinstance(text_lookup_result, str):
+        return _agent_response(text_lookup_result, model='deterministic-row-lookup')
+
+    data_query_result = _try_answer_data_query(user_query, document_context, provider_key=provider_key)
     if isinstance(data_query_result, str):
         return _agent_response(data_query_result, model='deterministic-query-engine')
     # Sentinel: the query matched the data-query gate but execution failed.
-    query_engine_failed = isinstance(data_query_result, dict) and data_query_result.get('_engine_failed')
+    query_engine_failed = (
+        (isinstance(text_lookup_result, dict) and text_lookup_result.get('_engine_failed'))
+        or (isinstance(data_query_result, dict) and data_query_result.get('_engine_failed'))
+    )
 
     # Phase 5a: when the spec engine explicitly failed (not just "not a data query"),
     # try Model B (pandas sandbox) automatically before falling to the prose LLM.
@@ -951,6 +1203,13 @@ def procure_agent(user_query: str, document_context: dict = None, session_state:
     context_block = build_document_context_block(document_context)
     if context_block:
         messages.append({'role': 'system', 'content': context_block})
+
+    # PEARL PRO: append cached workbook-wide sheet summaries so even a scoped
+    # single-sheet answer knows what the rest of the workbook contains.
+    if is_pearl_pro:
+        pearl_pro_block = _build_pearl_pro_summaries_block(document_context)
+        if pearl_pro_block:
+            messages.append({'role': 'system', 'content': pearl_pro_block})
 
     active_sheet = (document_context or {}).get('active_document', {}).get('active_sheet') if document_context else None
 

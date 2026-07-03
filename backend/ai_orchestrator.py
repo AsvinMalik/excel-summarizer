@@ -85,11 +85,13 @@ def create_chat_completion(
     # provider_key is an alias (frontend sends 'provider_key'; some callers pass it here)
     effective_key = provider_key if provider_key else model_key
 
-    # 'model_a', 'model_b', 'model_c' are pipeline-level keys handled in procure_agent
-    # before this function is ever reached; treat them as 'auto' here so internal LLM calls
-    # (query spec generation, grounding retries, map-reduce map step) still use the
-    # best-available chain rather than failing on an unknown preset.
-    if effective_key and effective_key not in ('auto', 'model_a', 'model_b', 'model_c', None):
+    # 'model_a', 'model_b', and 'pearl_pro' are pipeline-level keys handled in
+    # procure_agent before this function is ever reached; treat them as 'auto' here so
+    # internal LLM calls (query spec generation, grounding retries, map-reduce map step)
+    # still use the best-available chain rather than failing on an unknown preset.
+    # 'model_c' is the retired predecessor of pearl_pro, kept so stale clients
+    # degrade gracefully instead of erroring.
+    if effective_key and effective_key not in ('auto', 'model_a', 'model_b', 'model_c', 'pearl_pro', None):
         return _call_pinned(messages, max_tokens, effective_key)
     return _call_chain(messages, max_tokens)
 

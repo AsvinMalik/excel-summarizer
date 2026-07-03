@@ -1,4 +1,6 @@
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+// 127.0.0.1 (not "localhost"): the backend binds IPv4 only, and on Windows a
+// "localhost" lookup tries IPv6 ::1 first — a measured ~2s penalty per request.
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 
 async function uploadDocument({ file, company, userId }) {
   const formData = new FormData();

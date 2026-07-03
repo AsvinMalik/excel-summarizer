@@ -16,6 +16,8 @@ dist-ssr/
 # Backend runtime data
 backend/uploads/
 backend/logs/
+backend/snapshots/
+backend/audit_log.jsonl
 
 # Logs
 *.log

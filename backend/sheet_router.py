@@ -19,12 +19,25 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Whole-file intent tokens
+# Whole-file intent detection.
+# A summary VERB alone signals whole-file intent; bare scope words like
+# 'all'/'every'/'across' only count when paired with a file-level noun —
+# otherwise "give me all the key matters of Ajay team" wrongly routes to
+# the whole-file summary path and answers from metadata instead of rows.
 # ---------------------------------------------------------------------------
-_WHOLE_FILE_TOKENS = {
-    'summary', 'summarize', 'summarise', 'overview', 'overall',
-    'entire', 'all', 'whole', 'every', 'across',
-}
+_SUMMARY_VERBS = {'summary', 'summaries', 'summarize', 'summarise',
+                  'overview', 'overall'}
+_SCOPE_TOKENS = {'whole', 'entire', 'all', 'every', 'across', 'each'}
+_FILE_NOUNS = {'file', 'files', 'workbook', 'spreadsheet', 'document',
+               'excel', 'sheet', 'sheets', 'tab', 'tabs', 'page', 'pages',
+               'pagewise', 'xlsx', 'xls'}
+
+# Generic words excluded from cell-value matching (they appear in every sheet)
+_STOPWORDS = {'the', 'and', 'for', 'with', 'from', 'this', 'that', 'are',
+              'was', 'were', 'what', 'which', 'give', 'show', 'list', 'tell',
+              'get', 'of', 'in', 'to', 'me', 'my', 'please', 'their', 'there',
+              'is', 'it', 'on', 'at', 'by', 'an', 'as', 'do', 'does', 'has',
+              'have', 'can', 'you', 'about'}
 
 # ---------------------------------------------------------------------------
 # Tier-1 confidence threshold
@@ -33,10 +46,21 @@ _WHOLE_FILE_TOKENS = {
 _TIER1_WIN_MARGIN = 0.15
 _TIER1_MIN_SCORE = 0.05   # below this no keyword signal at all
 
+# A sheet with this raw score AND margin wins even against whole-file wording
+_STRONG_SHEET_SCORE = 4.0
+_STRONG_SHEET_MARGIN = 1.5
+
+# Only scan cell values of small (qualitative) sheets — names like 'Ajay team'
+# live in cells, not headers, so header matching alone can never route them.
+_VALUE_SCAN_MAX_CHARS = 4000
+
 
 def _tokenise(text: str) -> set[str]:
-    """Lowercase alpha tokens, length ≥ 2."""
-    return {w for w in re.findall(r'[a-z]{2,}', text.lower())}
+    """Lowercase alphanumeric tokens (length ≥ 2) plus naive singulars,
+    so 'matters' in a question still matches a 'Key matter' column."""
+    toks = {w for w in re.findall(r'[a-z0-9]{2,}', text.lower())}
+    toks |= {t[:-1] for t in toks if t.endswith('s') and len(t) >= 4}
+    return toks
 
 
 def _score_sheet(question_tokens: set[str], sheet_name: str,
@@ -61,7 +85,7 @@ def _score_sheet(question_tokens: set[str], sheet_name: str,
     return score
 
 
-def route_question(question: str, doc: dict) -> dict:
+def route_question(question: str, doc: dict, provider_key: str = 'auto') -> dict:
     """
     Returns:
         {
@@ -77,27 +101,10 @@ def route_question(question: str, doc: dict) -> dict:
                 "tier": "fallback", "reason": "no sheet list in doc"}
 
     q_tokens = _tokenise(question)
+    q_content = q_tokens - _STOPWORDS - _SUMMARY_VERBS - _SCOPE_TOKENS - _FILE_NOUNS
 
-    # --- whole-file intent detection -----------------------------------
-    if q_tokens & _WHOLE_FILE_TOKENS:
-        # must be asking about the whole file, not just an incidental "all"
-        whole_words = q_tokens & _WHOLE_FILE_TOKENS
-        non_sheet_dominant = True
-        # heuristic: if question is short and mentions a specific sheet name → not whole-file
-        for sn in sheet_names:
-            if _tokenise(sn) & q_tokens and len(q_tokens) <= 5:
-                non_sheet_dominant = False
-                break
-        if non_sheet_dominant and any(w in q_tokens for w in
-                                       {'summary', 'summarize', 'summarise',
-                                        'overview', 'overall', 'whole', 'entire', 'all'}):
-            logger.info(f"router sheet=__ALL__ tier=keyword conf=1.0 "
-                        f"reason=whole_file_tokens:{whole_words}")
-            return {"sheets": ["__ALL__"], "confidence": 1.0,
-                    "tier": "keyword",
-                    "reason": f"whole-file intent detected ({', '.join(sorted(whole_words))})"}
-
-    # --- Tier 1: keyword scoring ----------------------------------------
+    # --- Tier 1: keyword scoring (computed FIRST so whole-file wording can
+    # be overruled by a strong sheet-specific signal) ----------------------
     profile: dict = doc.get('profile') or {}
     roles: dict = doc.get('sheet_roles') or {}
     parsed_sheets: dict = doc.get('parsed_sheets') or {}
@@ -117,22 +124,43 @@ def route_question(question: str, doc: dict) -> dict:
                     cols = [c.strip() for c in raw.split(',') if c.strip()]
                     break
         role = roles.get(sn, '')
-        scores[sn] = _score_sheet(q_tokens, sn, cols, role)
+        score = _score_sheet(q_tokens, sn, cols, role)
 
-    if not scores or max(scores.values()) < _TIER1_MIN_SCORE:
-        # no keyword signal — go straight to Tier 2
-        return _tier2_route(question, doc, sheet_names, parsed_sheets, profile,
-                            fallback_scores=scores)
+        # Cell-value scoring for small qualitative sheets: entities like
+        # 'Ajay team' exist only in cells, never in headers. Weight 1.5,
+        # content tokens only (stopwords excluded).
+        section = parsed_sheets.get(sn) or ''
+        if section and len(section) <= _VALUE_SCAN_MAX_CHARS and q_content:
+            score += len(q_content & _tokenise(section)) * 1.5
+
+        scores[sn] = score
 
     sorted_sheets = sorted(scores.items(), key=lambda x: -x[1])
     top_name, top_score = sorted_sheets[0]
     second_score = sorted_sheets[1][1] if len(sorted_sheets) > 1 else 0.0
-
     total = sum(scores.values()) or 1.0
     normalised_top = top_score / total
     margin = top_score - second_score
+    strong_sheet = (top_score >= _STRONG_SHEET_SCORE
+                    and margin >= _STRONG_SHEET_MARGIN)
 
-    if margin >= _TIER1_WIN_MARGIN * total or normalised_top >= 0.55:
+    # --- whole-file intent detection -------------------------------------
+    verb_hit = bool(q_tokens & _SUMMARY_VERBS)
+    scope_hit = bool((q_tokens & _SCOPE_TOKENS) and (q_tokens & _FILE_NOUNS))
+    if (verb_hit or scope_hit) and not strong_sheet:
+        whole_words = q_tokens & (_SUMMARY_VERBS | _SCOPE_TOKENS | _FILE_NOUNS)
+        logger.info(f"router sheet=__ALL__ tier=keyword conf=1.0 "
+                    f"reason=whole_file_tokens:{whole_words}")
+        return {"sheets": ["__ALL__"], "confidence": 1.0,
+                "tier": "keyword",
+                "reason": f"whole-file intent detected ({', '.join(sorted(whole_words))})"}
+
+    if not scores or top_score < _TIER1_MIN_SCORE:
+        # no keyword signal — go straight to Tier 2
+        return _tier2_route(question, doc, sheet_names, parsed_sheets, profile,
+                            fallback_scores=scores, provider_key=provider_key)
+
+    if strong_sheet or margin >= _TIER1_WIN_MARGIN * total or normalised_top >= 0.55:
         logger.info(f"router sheet={top_name} tier=keyword "
                     f"conf={normalised_top:.2f} margin={margin:.2f}")
         return {
@@ -144,13 +172,15 @@ def route_question(question: str, doc: dict) -> dict:
 
     # ambiguous — escalate to Tier 2
     return _tier2_route(question, doc, sheet_names, parsed_sheets, profile,
-                        fallback_scores=scores, top_candidate=top_name)
+                        fallback_scores=scores, top_candidate=top_name,
+                        provider_key=provider_key)
 
 
 def _tier2_route(question: str, doc: dict, sheet_names: list[str],
                  parsed_sheets: dict, profile: dict,
                  fallback_scores: dict = None,
-                 top_candidate: str = None) -> dict:
+                 top_candidate: str = None,
+                 provider_key: str = 'auto') -> dict:
     """Tiny LLM call — only sheet index (names + roles + column headers), NO row data."""
     try:
         if create_chat_completion is None:
@@ -173,7 +203,22 @@ def _tier2_route(question: str, doc: dict, sheet_names: list[str],
                                 line[len('Columns:'):].split(',') if c.strip()][:15]
                         break
             cols_str = ', '.join(cols) if cols else '(no columns)'
-            lines.append(f"  [{sn}] role={role} cols={cols_str}")
+            # One sample data line so entity names living in cells (not
+            # headers) are visible to the routing LLM, e.g. 'Ajay team'.
+            sample = ''
+            section = parsed_sheets.get(sn) or ''
+            if section:
+                for dline in section.split('\n')[1:8]:
+                    dline = dline.strip()
+                    if (dline and not dline.startswith('Columns:')
+                            and not dline.startswith('===')
+                            and dline.replace(',', '').strip()):
+                        sample = dline[:90]
+                        break
+            entry = f"  [{sn}] role={role} cols={cols_str}"
+            if sample:
+                entry += f" sample={sample}"
+            lines.append(entry)
 
         index_text = '\n'.join(lines)
 
@@ -186,7 +231,7 @@ def _tier2_route(question: str, doc: dict, sheet_names: list[str],
         )
 
         messages = [{"role": "user", "content": prompt}]
-        resp = create_chat_completion(messages, max_tokens=60, provider_key='auto')
+        resp = create_chat_completion(messages, max_tokens=60, provider_key=provider_key)
         raw = (resp.choices[0].message.content or '').strip()
 
         # Parse JSON defensively
