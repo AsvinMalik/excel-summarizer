@@ -44,7 +44,22 @@ def build_document_context_block(document_context: dict = None) -> str:
     scope_instruction = (active_document or {}).get('scope_instruction')
     if scope_instruction:
         context_block += f"\n[USER SCOPE INSTRUCTION] {scope_instruction}\n"
-    for doc in documents:
+
+    # The enriched active_document is the scoped view (its data_preview is narrowed
+    # to the routed/pinned sheet). The documents list holds UNSCOPED copies — using
+    # one of those for the active doc silently feeds the LLM the whole-workbook
+    # preview, which gets provider-truncated and can drop the very sheet the router
+    # picked (observed: Sheet1 rows absent → "no data about Vikash"). Prefer the
+    # active_document object; keep other docs from the list.
+    docs_for_context = []
+    if active_document and active_document.get('data_preview'):
+        docs_for_context.append(active_document)
+    for _doc in documents:
+        if not (active_doc_id and _doc.get('doc_id') == active_doc_id
+                and docs_for_context):
+            docs_for_context.append(_doc)
+
+    for doc in docs_for_context:
         marker = ' (currently viewing)' if active_doc_id and doc.get('doc_id') == active_doc_id else ''
         context_block += f"\n- {doc.get('name', 'Unknown')}{marker}: type={doc.get('type', 'unknown')}, status={doc.get('status', 'unknown')}\n"
         if doc.get('data_preview'):
@@ -272,6 +287,12 @@ _TEXT_LOOKUP_ENTITY_RE = re.compile(
     r'\b(?:associated\s+with|related\s+to|for|of|from|to|by)\s+(?:the\s+)?(.+?)(?:[?.!,]|$)',
     re.IGNORECASE,
 )
+# Greedy-prefix variant: binds to the LAST preposition in the sentence, so a
+# leading column mention ("tell From entries of vikash") can't hijack the capture.
+_TEXT_LOOKUP_ENTITY_LAST_RE = re.compile(
+    r'.*\b(?:associated\s+with|related\s+to|for|of|from|to|by)\s+(?:the\s+)?(.+?)\s*(?:[?.!,]|$)',
+    re.IGNORECASE | re.DOTALL,
+)
 _TEXT_LOOKUP_STOPWORDS = {
     'tell', 'show', 'find', 'give', 'what', 'which', 'the', 'a', 'an',
     'is', 'are', 'was', 'were', 'matter', 'associated', 'related', 'with',
@@ -340,7 +361,11 @@ def _best_lookup_column(user_query: str, columns: list) -> Optional[str]:
 
 
 def _lookup_entity_terms(user_query: str) -> list:
-    match = _TEXT_LOOKUP_ENTITY_RE.search(user_query)
+    # Anchor to the LAST preposition (greedy .* prefix) — the entity trails the
+    # sentence. Matching the first preposition breaks on queries that mention a
+    # column first: "tell From entries of vikash" would match at "From" and
+    # capture "entries of vikash" as the entity instead of "vikash".
+    match = _TEXT_LOOKUP_ENTITY_LAST_RE.search(user_query)
     if not match:
         return []
     raw = re.sub(r'\b(?:team|group|person|vendor|party)\b', '', match.group(1), flags=re.IGNORECASE)
@@ -446,7 +471,10 @@ def _try_answer_text_lookup(user_query: str, document_context: dict = None) -> O
     for sheet_name, df in all_sheets.items():
         if target_column not in df.columns:
             continue
-        search_columns = [c for c in df.columns if c != target_column]
+        # Search EVERY column for the entity, including the target itself —
+        # "From entries of vikash" means rows where From IS Vikash, which an
+        # excluded target column can never match.
+        search_columns = list(df.columns)
         for _, row in df.iterrows():
             target_value = row.get(target_column)
             if str(target_value).strip() in ('', 'nan', 'NaT'):
