@@ -59,6 +59,32 @@ async function sendSAPQuery({ query, providerKey = 'auto' }) {
   throw new Error(`SAP query failed: ${response.statusText}`);
 }
 
+/**
+ * Dashboard metrics computed live from the SAP datasets (deterministic, no LLM).
+ * Every stat card reads from this — real numbers now (mock SAP), real SAP later.
+ */
+async function getSapMetrics({ force = false } = {}) {
+  const response = await fetch(`${BASE_URL}/api/sap-metrics${force ? '?force=true' : ''}`);
+  if (!response.ok) throw new Error(`SAP metrics failed: ${response.statusText}`);
+  return response.json();
+}
+
+/**
+ * Grounded AI executive insight for one dashboard section (overview | dashboard
+ * | contracts | vendors | risk). Structured body returned even on 422 so the UI
+ * can show the specific message.
+ */
+async function getSapInsight({ section, providerKey = 'auto' }) {
+  const response = await fetch(`${BASE_URL}/api/sap-insight`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ section, provider_key: providerKey }),
+  });
+  const body = await response.json().catch(() => null);
+  if (body) return body;
+  throw new Error(`SAP insight failed: ${response.statusText}`);
+}
+
 async function listDocuments(userId) {
   const response = await fetch(`${BASE_URL}/api/documents?user_id=${encodeURIComponent(userId)}`);
   if (!response.ok) {
@@ -200,6 +226,8 @@ export {
   uploadDocument,
   sendChat,
   sendSAPQuery,
+  getSapMetrics,
+  getSapInsight,
   listDocuments,
   querySpreadsheet,
   generateRFQ,

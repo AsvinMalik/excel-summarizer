@@ -406,6 +406,10 @@ class SAPQueryRequest(BaseModel):
     query: str
     provider_key: Optional[str] = 'auto'  # honors the UI provider selection
 
+class SAPInsightRequest(BaseModel):
+    section: str                          # overview | dashboard | contracts | vendors | risk
+    provider_key: Optional[str] = 'auto'
+
 class InsightsRequest(BaseModel):
     session_id: Optional[str] = None
     context: Optional[dict] = None
@@ -1085,6 +1089,25 @@ async def sap_query(request: SAPQueryRequest):
         doc_name=(result.get('referenced_file') or {}).get('name'),
     )
     status_code = 200 if result.get('status') == 'success' else 422
+    return JSONResponse(_json_safe(result), status_code=status_code)
+
+
+@app.get("/api/sap-metrics")
+async def sap_metrics(force: bool = False):
+    """Dashboard metrics computed live from the SAP datasets (no LLM, cached).
+    Drives every stat card in the UI — real numbers today from the mock SAP
+    layer, real SAP numbers the moment credentials are wired in."""
+    from sap_insights import compute_metrics
+    return JSONResponse(_json_safe(compute_metrics(force=force)))
+
+
+@app.post("/api/sap-insight")
+async def sap_insight(request: SAPInsightRequest):
+    """Grounded AI executive insight for one dashboard section, computed over
+    the deterministic metrics for that section (never raw rows)."""
+    from sap_insights import generate_section_insight
+    result = generate_section_insight(request.section, provider_key=request.provider_key or 'auto')
+    status_code = 200 if 'insight' in result else 422
     return JSONResponse(_json_safe(result), status_code=status_code)
 
 

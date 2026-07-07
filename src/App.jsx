@@ -10,6 +10,9 @@ import {
 import SAPWorkbench from './components/SAPWorkbench';
 import RFQBuilder from './components/RFQBuilder';
 import AuthPanel from './components/AuthPanel';
+import StatCard from './components/StatCard';
+import SapInsightPanel from './components/SapInsightPanel';
+import { useSapMetrics, fmtUsd, fmtNum } from './hooks/useSapMetrics';
 import { useAuth } from './context/AuthContext';
 
 const sections = [
@@ -39,6 +42,10 @@ function App() {
   const [sessionId] = useState(() => localStorage.getItem('procure_session') || `session-${Date.now()}`);
   const { user, loading, logout, isFirebaseConfigured } = useAuth();
   const requiresAuth = isFirebaseConfigured;
+
+  // Live SAP-derived dashboard metrics — one snapshot feeds every stat card.
+  const { metrics, loading: metricsLoading, error: metricsError } = useSapMetrics();
+  const m = metrics || {};
 
   useEffect(() => {
     localStorage.setItem('procure_session', sessionId);
@@ -122,21 +129,31 @@ function App() {
 
           <aside className="space-y-6">
             <div className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-soft">
-              <p className="text-sm font-semibold uppercase tracking-[0.24em] text-slate-500">Platform overview</p>
-              <div className="mt-6 grid gap-4">
-                <div className="rounded-3xl border border-slate-200 p-5">
-                  <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Contracts analyzed</p>
-                  <p className="mt-3 text-3xl font-semibold text-slate-900">1,264</p>
-                </div>
-                <div className="rounded-3xl border border-slate-200 p-5">
-                  <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Vendor records</p>
-                  <p className="mt-3 text-3xl font-semibold text-slate-900">482</p>
-                </div>
-                <div className="rounded-3xl border border-slate-200 p-5">
-                  <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Risk flags raised</p>
-                  <p className="mt-3 text-3xl font-semibold text-slate-900">37</p>
-                </div>
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold uppercase tracking-[0.24em] text-slate-500">Platform overview</p>
+                <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-semibold text-emerald-700">
+                  {metricsError ? 'SAP offline' : (m.source || 'SAP')}
+                </span>
               </div>
+              <div className="mt-6 grid gap-4">
+                {[
+                  { label: 'Active contracts', value: fmtNum(m.overview?.active_contracts) },
+                  { label: 'Vendor records', value: fmtNum(m.overview?.vendor_records) },
+                  { label: 'Risk flags raised', value: fmtNum(m.overview?.risk_flags) },
+                ].map((stat) => (
+                  <div key={stat.label} className="rounded-3xl border border-slate-200 p-5">
+                    <p className="text-xs uppercase tracking-[0.24em] text-slate-500">{stat.label}</p>
+                    {metricsLoading ? (
+                      <div className="mt-3 h-8 w-20 animate-pulse rounded-lg bg-slate-200" />
+                    ) : (
+                      <p className="mt-3 text-3xl font-semibold text-slate-900">{stat.value}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {metricsError && (
+                <p className="mt-4 text-xs text-amber-600">{metricsError}</p>
+              )}
             </div>
             <div className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-soft">
               <p className="text-sm font-semibold uppercase tracking-[0.24em] text-slate-500">Product navigation</p>
@@ -174,65 +191,114 @@ function App() {
                 <button className="inline-flex items-center rounded-full bg-sky-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-sky-600/10 hover:bg-sky-700 transition">Review key insights</button>
               </div>
               <div className="mt-8 grid gap-4 lg:grid-cols-3">
-                <div className="rounded-[1.75rem] border border-slate-200 bg-slate-50 p-6">
-                  <p className="text-sm text-slate-500">Renewals due</p>
-                  <p className="mt-4 text-4xl font-semibold text-slate-900">24</p>
-                  <p className="mt-3 text-sm text-slate-600">Contracts expiring in the next 60 days.</p>
-                </div>
-                <div className="rounded-[1.75rem] border border-slate-200 bg-slate-50 p-6">
-                  <p className="text-sm text-slate-500">Spend exposure</p>
-                  <p className="mt-4 text-4xl font-semibold text-slate-900">$18.4M</p>
-                  <p className="mt-3 text-sm text-slate-600">Total spend at risk from unreviewed renewals.</p>
-                </div>
-                <div className="rounded-[1.75rem] border border-slate-200 bg-slate-50 p-6">
-                  <p className="text-sm text-slate-500">High-risk contracts</p>
-                  <p className="mt-4 text-4xl font-semibold text-slate-900">7</p>
-                  <p className="mt-3 text-sm text-slate-600">Contracts with unresolved compliance or liability issues.</p>
-                </div>
+                <StatCard
+                  label="Renewals due"
+                  value={fmtNum(m.dashboard?.renewals_due)}
+                  sub={`Contracts expiring in the next ${m.dashboard?.renewal_horizon_days ?? 90} days.`}
+                  loading={metricsLoading}
+                  tone="amber"
+                />
+                <StatCard
+                  label="Spend exposure"
+                  value={fmtUsd(m.dashboard?.spend_exposure_usd)}
+                  sub="Contract value at risk from unreviewed renewals."
+                  loading={metricsLoading}
+                  tone="red"
+                />
+                <StatCard
+                  label="Open purchase orders"
+                  value={fmtNum(m.dashboard?.open_purchase_orders)}
+                  sub="Purchasing commitments not yet fully delivered."
+                  loading={metricsLoading}
+                />
               </div>
+              <SapInsightPanel section="dashboard" />
             </div>
           )}
 
           {activeSection === 'contracts' && (
             <div>
               <p className="text-sm uppercase tracking-[0.24em] text-slate-500">Contracts</p>
-              <h2 className="mt-3 text-2xl font-semibold text-slate-900">Smart contract review workflows</h2>
+              <h2 className="mt-3 text-2xl font-semibold text-slate-900">Contract portfolio from SAP</h2>
               <div className="mt-8 grid gap-4 md:grid-cols-3">
-                <div className="rounded-[1.75rem] border border-slate-200 bg-slate-50 p-6">
-                  <p className="text-sm text-slate-500">Agreements analyzed</p>
-                  <p className="mt-4 text-3xl font-semibold text-slate-900">512</p>
-                  <p className="mt-3 text-sm text-slate-600">Fully processed contract documents with clause-level details.</p>
-                </div>
-                <div className="rounded-[1.75rem] border border-slate-200 bg-slate-50 p-6">
-                  <p className="text-sm text-slate-500">Clause extractions</p>
-                  <p className="mt-4 text-3xl font-semibold text-slate-900">1,804</p>
-                  <p className="mt-3 text-sm text-slate-600">Payment, termination, indemnity, SLA, and renewal clauses extracted.</p>
-                </div>
-                <div className="rounded-[1.75rem] border border-slate-200 bg-slate-50 p-6">
-                  <p className="text-sm text-slate-500">Review throughput</p>
-                  <p className="mt-4 text-3xl font-semibold text-slate-900">84%</p>
-                  <p className="mt-3 text-sm text-slate-600">Of contract summaries reviewed by legal and procurement teams.</p>
-                </div>
+                <StatCard
+                  label="Total agreements"
+                  value={fmtNum(m.contracts?.total_agreements)}
+                  sub="Outline agreements and contracts in the SAP register."
+                  loading={metricsLoading}
+                />
+                <StatCard
+                  label="Total contract value"
+                  value={fmtUsd(m.contracts?.total_contract_value_usd)}
+                  sub="Aggregate committed value across all contracts."
+                  loading={metricsLoading}
+                  tone="sky"
+                />
+                <StatCard
+                  label="Auto-renewal contracts"
+                  value={fmtNum(m.contracts?.auto_renewal_count)}
+                  sub="Contracts set to renew automatically — review before expiry."
+                  loading={metricsLoading}
+                  tone="amber"
+                />
               </div>
+              {m.contracts?.expiring_soon?.length > 0 && (
+                <div className="mt-6 overflow-x-auto rounded-2xl border border-slate-200">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
+                      <tr>
+                        <th className="px-4 py-3">Contract</th>
+                        <th className="px-4 py-3">Vendor</th>
+                        <th className="px-4 py-3">Expires</th>
+                        <th className="px-4 py-3 text-right">Value</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {m.contracts.expiring_soon.map((c) => (
+                        <tr key={c.contract}>
+                          <td className="px-4 py-3 font-medium text-slate-800">{c.contract}</td>
+                          <td className="px-4 py-3 text-slate-600">{c.vendor}</td>
+                          <td className="px-4 py-3 text-slate-600">{c.valid_to}</td>
+                          <td className="px-4 py-3 text-right text-slate-800">{fmtUsd(c.value_usd)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <SapInsightPanel section="contracts" />
             </div>
           )}
 
           {activeSection === 'rfq' && (
             <div>
               <p className="text-sm uppercase tracking-[0.24em] text-slate-500">RFQ Automation</p>
-              <h2 className="mt-3 text-2xl font-semibold text-slate-900">Generate compliant RFQs in minutes</h2>
-              <div className="mt-8 grid gap-4 md:grid-cols-2">
-                <div className="rounded-[1.75rem] border border-slate-200 bg-slate-50 p-6">
-                  <p className="text-sm text-slate-500">Template reuse</p>
-                  <p className="mt-4 text-3xl font-semibold text-slate-900">100+</p>
-                  <p className="mt-3 text-sm text-slate-600">Standardized RFQ formats for regulated industries and enterprise vendors.</p>
-                </div>
-                <div className="rounded-[1.75rem] border border-slate-200 bg-slate-50 p-6">
-                  <p className="text-sm text-slate-500">Time saved</p>
-                  <p className="mt-4 text-3xl font-semibold text-slate-900">65%</p>
-                  <p className="mt-3 text-sm text-slate-600">Faster tender creation with inherited contract terms and compliance controls.</p>
-                </div>
+              <h2 className="mt-3 text-2xl font-semibold text-slate-900">Sourcing & vendor spend from SAP</h2>
+              <div className="mt-8 grid gap-4 md:grid-cols-3">
+                <StatCard
+                  label="Active vendors"
+                  value={fmtNum(m.vendors?.total_vendors)}
+                  sub="Suppliers available for sourcing and RFQ distribution."
+                  loading={metricsLoading}
+                />
+                <StatCard
+                  label="Total vendor spend"
+                  value={fmtUsd(m.vendors?.total_spend_usd)}
+                  sub={m.vendors?.top_vendor_by_spend
+                    ? `Top vendor: ${m.vendors.top_vendor_by_spend.name} (${fmtUsd(m.vendors.top_vendor_by_spend.spend_usd)}).`
+                    : 'Aggregate spend across all vendors.'}
+                  loading={metricsLoading}
+                  tone="sky"
+                />
+                <StatCard
+                  label="Open PO value"
+                  value={fmtUsd(m.vendors?.open_po_value_usd)}
+                  sub="Value of purchase orders currently open."
+                  loading={metricsLoading}
+                  tone="amber"
+                />
               </div>
+              <SapInsightPanel section="vendors" />
               <div className="mt-10">
                 <RFQBuilder documents={documents} activeDoc={activeDoc} sessionId={sessionId} />
               </div>
@@ -242,24 +308,31 @@ function App() {
           {activeSection === 'risk' && (
             <div>
               <p className="text-sm uppercase tracking-[0.24em] text-slate-500">Risk</p>
-              <h2 className="mt-3 text-2xl font-semibold text-slate-900">Enterprise risk posture for procurement teams</h2>
+              <h2 className="mt-3 text-2xl font-semibold text-slate-900">Vendor risk posture from SAP</h2>
               <div className="mt-8 grid gap-4 md:grid-cols-3">
-                <div className="rounded-[1.75rem] border border-slate-200 bg-slate-50 p-6">
-                  <p className="text-sm text-slate-500">High-severity issues</p>
-                  <p className="mt-4 text-3xl font-semibold text-slate-900">14</p>
-                  <p className="mt-3 text-sm text-slate-600">Contracts flagged for indemnity, liability, or termination concerns.</p>
-                </div>
-                <div className="rounded-[1.75rem] border border-slate-200 bg-slate-50 p-6">
-                  <p className="text-sm text-slate-500">Compliance gaps</p>
-                  <p className="mt-4 text-3xl font-semibold text-slate-900">22</p>
-                  <p className="mt-3 text-sm text-slate-600">Regulatory risk items identified in vendor agreements and RFQ terms.</p>
-                </div>
-                <div className="rounded-[1.75rem] border border-slate-200 bg-slate-50 p-6">
-                  <p className="text-sm text-slate-500">Audit readiness</p>
-                  <p className="mt-4 text-3xl font-semibold text-slate-900">98%</p>
-                  <p className="mt-3 text-sm text-slate-600">Contracts and reports classified for executive review and audit retention.</p>
-                </div>
+                <StatCard
+                  label="High-risk vendors"
+                  value={fmtNum(m.risk?.high_risk_vendors)}
+                  sub="Vendors rated High in the SAP compliance master."
+                  loading={metricsLoading}
+                  tone="red"
+                />
+                <StatCard
+                  label="Compliance gaps"
+                  value={fmtNum(m.risk?.compliance_gaps)}
+                  sub="Vendors with no certifications or a blocked flag."
+                  loading={metricsLoading}
+                  tone="amber"
+                />
+                <StatCard
+                  label="High-risk contract value"
+                  value={fmtUsd(m.risk?.high_risk_contract_value_usd)}
+                  sub="Committed contract value tied to high-risk or blocked vendors."
+                  loading={metricsLoading}
+                  tone="red"
+                />
               </div>
+              <SapInsightPanel section="risk" />
             </div>
           )}
 
