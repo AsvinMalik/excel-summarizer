@@ -7,7 +7,7 @@ import {
   MessageCircle,
   CircleDollarSign,
 } from 'lucide-react';
-import ProcurementAssistant from './components/ProcurementAssistant';
+import SAPWorkbench from './components/SAPWorkbench';
 import RFQBuilder from './components/RFQBuilder';
 import AuthPanel from './components/AuthPanel';
 import { useAuth } from './context/AuthContext';
@@ -32,18 +32,10 @@ const FeatureCard = ({ title, description, badge }) => (
 
 function App() {
   const [activeSection, setActiveSection] = useState('assistant');
-  const [documents, setDocuments] = useState([]);
-  const [activeDoc, setActiveDoc] = useState(null);
-  // Per-document active sheet: { [doc_id]: sheetName }. Keyed by backend doc_id so
-  // it survives the activeDoc (frontend id) changing while the same file stays loaded.
-  const [activeSheetMap, setActiveSheetMap] = useState({});
-  const [messages, setMessages] = useState([
-    {
-      id: 1,
-      type: 'system',
-      text: 'Welcome to Procure.ai — your enterprise procurement intelligence platform. Upload contracts, request quotations, analyze vendor data, or ask anything about your procurement operations.',
-    },
-  ]);
+  // documents/activeDoc retained for the RFQ builder flow; the assistant is
+  // now the SAP-connected workbench and no longer takes uploaded documents.
+  const [documents] = useState([]);
+  const [activeDoc] = useState(null);
   const [sessionId] = useState(() => localStorage.getItem('procure_session') || `session-${Date.now()}`);
   const { user, loading, logout, isFirebaseConfigured } = useAuth();
   const requiresAuth = isFirebaseConfigured;
@@ -272,18 +264,11 @@ function App() {
           )}
 
           {activeSection === 'assistant' && (
-            <div className="mt-4">
-              <ProcurementAssistant
-                documents={documents}
-                setDocuments={setDocuments}
-                activeDoc={activeDoc}
-                setActiveDoc={setActiveDoc}
-                activeSheetMap={activeSheetMap}
-                setActiveSheetMap={setActiveSheetMap}
-                messages={messages}
-                setMessages={setMessages}
-                sessionId={sessionId}
-              />
+            <div className="mt-4 mx-auto max-w-7xl">
+              {/* SAP-connected RAG workspace — replaces the manual-upload
+                  assistant. ProcurementAssistant remains in the codebase for
+                  one-line rollback if the pivot is reverted. */}
+              <SAPWorkbench />
             </div>
           )}
             </section>

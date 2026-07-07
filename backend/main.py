@@ -402,6 +402,10 @@ class ExportRequest(BaseModel):
     format: str = "standard"  # "standard" | "executive"
     file_format: str = "docx"  # "docx" | "pdf"
 
+class SAPQueryRequest(BaseModel):
+    query: str
+    provider_key: Optional[str] = 'auto'  # honors the UI provider selection
+
 class InsightsRequest(BaseModel):
     session_id: Optional[str] = None
     context: Optional[dict] = None
@@ -1064,6 +1068,25 @@ async def query_spreadsheet(request: dict):
         })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.post("/api/sap-query")
+async def sap_query(request: SAPQueryRequest):
+    """Autonomous SAP RAG pipeline: AI-route the question to the right SAP
+    dataset, fetch it, analyze it with the pandas agent, and return the answer
+    plus the referenced-file metadata for the frontend's SAP sidebar."""
+    from sap_analyzer import analyze_sap_query
+
+    result = analyze_sap_query(request.query, provider_key=request.provider_key or 'auto')
+
+    log_event(
+        'sap_query',
+        query=request.query,
+        answer_source='sap_pipeline',
+        doc_name=(result.get('referenced_file') or {}).get('name'),
+    )
+    status_code = 200 if result.get('status') == 'success' else 422
+    return JSONResponse(_json_safe(result), status_code=status_code)
+
 
 @app.post("/api/export")
 async def export_report(request: ExportRequest):

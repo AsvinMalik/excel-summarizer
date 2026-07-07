@@ -42,6 +42,23 @@ async function sendChat({ sessionId, userQuery, context, modelKey = 'model_a', p
   return response.json();
 }
 
+/**
+ * Autonomous SAP RAG query: the backend AI-routes the question to the right
+ * SAP dataset, analyzes it, and returns the answer + referenced-file metadata.
+ * Non-2xx with a structured body (status: "error") is returned, not thrown,
+ * so the UI can render the specific failure message.
+ */
+async function sendSAPQuery({ query, providerKey = 'auto' }) {
+  const response = await fetch(`${BASE_URL}/api/sap-query`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, provider_key: providerKey }),
+  });
+  const body = await response.json().catch(() => null);
+  if (body) return body;
+  throw new Error(`SAP query failed: ${response.statusText}`);
+}
+
 async function listDocuments(userId) {
   const response = await fetch(`${BASE_URL}/api/documents?user_id=${encodeURIComponent(userId)}`);
   if (!response.ok) {
@@ -182,6 +199,7 @@ async function fetchSheetData({ docId, sheetName, offset = 0, limit = 100 }) {
 export {
   uploadDocument,
   sendChat,
+  sendSAPQuery,
   listDocuments,
   querySpreadsheet,
   generateRFQ,
